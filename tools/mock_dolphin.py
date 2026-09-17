@@ -127,19 +127,32 @@ def main():
                     help="seconds, then stop granting cycles without closing "
                          "the socket — the case the compositor must survive")
     ap.add_argument("--bind", default="127.0.0.1")
+    ap.add_argument("--data-port", type=int, default=DATA_PORT)
+    ap.add_argument("--clock-port", type=int, default=CLOCK_PORT)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     srvs = []
-    for port in (DATA_PORT, CLOCK_PORT):
+    for port in (args.data_port, args.clock_port):
         s = socket.socket()
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((args.bind, port))
+        try:
+            s.bind((args.bind, port))
+        except OSError as e:
+            # Almost always a real Dolphin already holding the port. Failing
+            # loudly matters: a mock that dies here leaves the client to
+            # connect to Dolphin instead, and the test silently measures
+            # something other than what it claims to.
+            print(f"FATAL: cannot bind {args.bind}:{port} - {e}\n"
+                  f"Something else is listening, most likely Dolphin itself. "
+                  f"Stop it, or pass --data-port/--clock-port to move the mock "
+                  f"and match them on the client.", file=sys.stderr, flush=True)
+            return 1
         s.listen(4)
         srvs.append(s)
     data_srv, clock_srv = srvs
     print(f"mock dolphin: listening on {args.bind} "
-          f"(data {DATA_PORT}, clock {CLOCK_PORT}), "
+          f"(data {args.data_port}, clock {args.clock_port}), "
           f"waiting for {args.players} GBA(s)", flush=True)
 
     stop = threading.Event()

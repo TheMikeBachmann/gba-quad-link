@@ -197,13 +197,28 @@ void core_thread(const std::string& rom, const std::string& bios,
             std::fflush(stdout);
         }
 
-        deadline += period;
-        const auto now = std::chrono::steady_clock::now();
-        // Never bank credit. A core Dolphin has been holding below real time
-        // is behind by however long that lasted, and letting it spend that
-        // backlog would have it sprint the moment the link recovers.
-        if (deadline < now) deadline = now;
-        std::this_thread::sleep_until(deadline);
+        if (linked) {
+            // No ceiling while the link is healthy, because Dolphin blocks the
+            // thread it emulates the GameCube on until this guest answers —
+            // up to a second, in GBASockServer::Receive. It grants roughly a
+            // frame of cycles and then waits for that frame to be run, so any
+            // time spent sleeping here is time the GameCube spends stopped.
+            //
+            // Holding the guest to 59.7fps therefore costs the host a full
+            // 16.7ms per exchange and drags the game down to a third of its
+            // frame rate. Running flat out is what keeps Dolphin moving: the
+            // clock socket is what stops the guest getting ahead, and it does
+            // that by withholding cycles rather than by our waiting.
+            deadline = std::chrono::steady_clock::now();
+        } else {
+            deadline += period;
+            const auto now = std::chrono::steady_clock::now();
+            // Never bank credit. A core that has been held below real time is
+            // behind by however long that lasted, and letting it spend that
+            // backlog would have it sprint once it was released.
+            if (deadline < now) deadline = now;
+            std::this_thread::sleep_until(deadline);
+        }
     }
 }
 
