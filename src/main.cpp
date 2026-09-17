@@ -843,10 +843,26 @@ int main(int argc, char** argv) {
                     // has one, so these are exclusive.
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(92.0f);
-                    static const char* kModes[] = {"solo", "cable", "dolphin"};
-                    int cur = static_cast<int>(machines[p].mode);
-                    if (ImGui::Combo("##mode", &cur, kModes, 3)) {
-                        const auto want = static_cast<gql::LinkMode>(cur);
+                    // Label and mode together. Listing the labels separately
+                    // and casting the chosen index to the enum needs the two
+                    // orders to agree, and when they silently did not, picking
+                    // "dolphin" put a machine on the cable and picking "cable"
+                    // sent it to a Dolphin that was not there.
+                    struct ModeChoice { const char* label; gql::LinkMode mode; };
+                    static const ModeChoice kModes[] = {
+                        {"solo",    gql::LinkMode::None},
+                        {"cable",   gql::LinkMode::Cable},
+                        {"dolphin", gql::LinkMode::Dolphin},
+                    };
+                    constexpr int kModeCount =
+                        static_cast<int>(sizeof kModes / sizeof kModes[0]);
+                    int cur = 0;
+                    for (int k = 0; k < kModeCount; ++k)
+                        if (kModes[k].mode == machines[p].mode) cur = k;
+                    const char* labels[kModeCount];
+                    for (int k = 0; k < kModeCount; ++k) labels[k] = kModes[k].label;
+                    if (ImGui::Combo("##mode", &cur, labels, kModeCount)) {
+                        const gql::LinkMode want = kModes[cur].mode;
                         if (want != machines[p].mode) {
                             if (want == gql::LinkMode::Dolphin && host.empty())
                                 status = "No Dolphin to join - set a host "
