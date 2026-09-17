@@ -14,11 +14,18 @@
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/sio.h>
 #include <mgba/internal/gba/sio/dolphin.h>
+#include <mgba/internal/gba/sio/lockstep.h>
+
+#include <condition_variable>
+#include <mutex>
+
+#include "cable.h"
 
 #include <fcntl.h>
 #include <sys/socket.h>
 
 #include <cerrno>
+#include <cstddef>
 
 #include <cstdarg>
 #include <cstdio>
@@ -123,6 +130,99 @@ struct GbaInstance::Audio {
     unsigned source_rate = 0;
 };
 
+// One machine's end of the cable: mGBA's driver, plus the sleep/wake plumbing
+// the coordinator drives it with.
+//
+// mGBA's own implementation of this defers to mCoreThread, whose "sleep" posts
+// a request that the thread honours at its next opportunity rather than
+// blocking on the spot. Ours has to behave the same way, and can: the
+// coordinator forces the sleeping core's CPU out of its run loop immediately
+// afterwards, so run_frame() returns and the waiting happens in cable_wait().
+// Blocking inside this callback instead would deadlock, because it is called
+// while the coordinator's own mutex is held.
+struct GbaInstance::Cable {
+    struct GBASIOLockstepDriver driver;
+    struct mLockstepUser user;
+    CableGroup* group = nullptr;
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool asleep = false;
+    bool leaving = false;      // shutting down; never sleep again
+    int preferred_id = -1;
+    bool attached = false;
+};
+
+namespace {
+
+GbaInstance::Cable* cable_of(struct mLockstepUser* user) {
+    // `user` is the member, so step back to the object holding it.
+    return reinterpret_cast<GbaInstance::Cable*>(
+        reinterpret_cast<char*>(user) - offsetof(GbaInstance::Cable, user));
+}
+
+void cable_sleep(struct mLockstepUser* user) {
+    GbaInstance::Cable* c = cable_of(user);
+    std::lock_guard<std::mutex> lk(c->mutex);
+    c->asleep = true;
+}
+
+void cable_wake(struct mLockstepUser* user) {
+    GbaInstance::Cable* c = cable_of(user);
+    {
+        std::lock_guard<std::mutex> lk(c->mutex);
+        c->asleep = false;
+    }
+    c->cv.notify_all();
+}
+
+int cable_requested_id(struct mLockstepUser* user) {
+    return cable_of(user)->preferred_id;
+}
+
+}  // namespace
+
+void GbaInstance::attach_cable(CableGroup* group, int preferred_id) {
+    if (!core_ || !group || cable_ || (link_ && link_->attached)) return;
+
+    cable_ = new Cable();
+    cable_->group = group;
+    cable_->preferred_id = preferred_id;
+    memset(&cable_->user, 0, sizeof(cable_->user));
+    cable_->user.sleep = cable_sleep;
+    cable_->user.wake = cable_wake;
+    cable_->user.requestedId = cable_requested_id;
+
+    GBASIOLockstepDriverCreate(&cable_->driver, &cable_->user);
+    GBASIOLockstepCoordinatorAttach(
+        static_cast<struct GBASIOLockstepCoordinator*>(group->raw()),
+        &cable_->driver);
+
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+    GBASIOSetDriver(&gba->sio, &cable_->driver.d);
+    cable_->attached = true;
+}
+
+void GbaInstance::cable_wait() {
+    if (!cable_) return;
+    std::unique_lock<std::mutex> lk(cable_->mutex);
+    cable_->cv.wait(lk, [this] {
+        return !cable_->asleep || cable_->leaving;
+    });
+}
+
+void GbaInstance::wake_cable() {
+    if (!cable_) return;
+    {
+        std::lock_guard<std::mutex> lk(cable_->mutex);
+        cable_->leaving = true;
+        cable_->asleep = false;
+    }
+    cable_->cv.notify_all();
+}
+
+bool GbaInstance::on_cable() const { return cable_ && cable_->attached; }
+
 GbaInstance::~GbaInstance() { close(); }
 
 bool GbaInstance::open(const std::string& rom, const std::string& bios,
@@ -213,8 +313,22 @@ void GbaInstance::close() {
             GBASIOSetDriver(&gba->sio, nullptr);
             link_->attached = false;
         }
+        if (cable_ && cable_->attached) {
+            struct GBA* gba = static_cast<struct GBA*>(core_->board);
+            GBASIOSetDriver(&gba->sio, nullptr);
+            GBASIOLockstepCoordinatorDetach(
+                static_cast<struct GBASIOLockstepCoordinator*>(
+                    cable_->group->raw()),
+                &cable_->driver);
+            cable_->attached = false;
+        }
         core_->deinit(core_);   // takes the ROM and BIOS VFiles with it
         core_ = nullptr;
+    }
+    if (cable_) {
+        wake_cable();
+        delete cable_;
+        cable_ = nullptr;
     }
     if (link_) {
         GBASIODolphinDestroy(&link_->dol);

@@ -35,7 +35,12 @@ enum class LinkState {
     Waiting,      // connected, but the guest has not entered JOY bus mode
     Linked,       // connected and talking
     Lost,         // was linked, Dolphin went away
+    Cable,        // on the link cable with the other machines
 };
+
+// What a machine's serial port is plugged into. A GBA has one, and mGBA has
+// one driver slot per core, so these are exclusive.
+enum class LinkMode { None, Dolphin, Cable };
 
 const char* link_state_name(LinkState s);
 
@@ -69,6 +74,8 @@ struct Machine {
 
     // Set by the host thread before the core thread starts, read by it after.
     bool dialled = false;
+
+    LinkMode mode = LinkMode::None;
 
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.

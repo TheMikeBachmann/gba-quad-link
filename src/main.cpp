@@ -34,6 +34,7 @@
 #include <thread>
 #include <vector>
 
+#include "cable.h"
 #include "controls.h"
 #include "gba_instance.h"
 #include "layout.h"
@@ -95,8 +96,15 @@ struct AudioOut {
 
 // Runs one machine until told to stop. The instance was opened and dialled by
 // the host thread; from here on it belongs to this one.
-void machine_thread(Machine* me, AudioOut* audio) {
+void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
     gql::set_log_player(me->index);
+
+    // On the cable, the machine's position is its quadrant, so player one is
+    // the parent — which is what the cable's own numbering means to a game.
+    if (me->mode == gql::LinkMode::Cable && cable) {
+        me->gba.attach_cable(cable, me->index);
+        me->link.store(LinkState::Cable, std::memory_order_relaxed);
+    }
 
     // Must happen here, not on the host thread: attaching schedules the
     // driver's first event against this core's timing.
@@ -135,6 +143,10 @@ void machine_thread(Machine* me, AudioOut* audio) {
                              ? 0x03FF
                              : me->keys.load(std::memory_order_relaxed));
         me->gba.run_frame();
+        // The coordinator stops a machine that has run ahead by marking it
+        // asleep and forcing its CPU out, so run_frame() came back early and
+        // the waiting belongs here.
+        me->gba.cable_wait();
         me->gba.note_sio_mode();
         ++frame;
 
@@ -203,6 +215,7 @@ int main(int argc, char** argv) {
     std::string cfg_path;
     std::string host;               // empty: run unlinked
     std::string rom_dir_arg;        // empty: look in the usual places
+    bool cable_all = false;         // every machine on one link cable
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -234,6 +247,7 @@ int main(int argc, char** argv) {
         else if (a == "--controls") cfg_path = next();
         else if (a == "--host") host = next();
         else if (a == "--rom-dir") rom_dir_arg = next();
+        else if (a == "--cable") cable_all = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -246,7 +260,7 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P]]... [--rom-dir D]\n"
+                "          [--player N [--rom P]]... [--rom-dir D] [--cable]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
                 "          [--scale N] [--fullscreen] [--integer-scale]\n"
                 "          [--audio-player 1-4] [--verbose]\n"
@@ -306,6 +320,10 @@ int main(int argc, char** argv) {
     SDL_JoystickID pad_ids[kMaxPlayers] = {-1, -1, -1, -1};
     Machine machines[kMaxPlayers];
     for (int i = 0; i < kMaxPlayers; ++i) machines[i].index = i;
+
+    // One cable, shared by whichever machines are plugged into it. Cheap when
+    // nothing is.
+    gql::CableGroup cable;
 
     // Claim the lowest free quadrant, so pads land on players 1..4 in the
     // order they appear and a removed pad's slot is reused.
@@ -425,9 +443,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (cable_all) {
+        for (int i = 0; i < players; ++i)
+            machines[i].mode = gql::LinkMode::Cable;
+        std::printf("link cable: %d machines chained "
+                    "(player 1 is the parent)\n", players);
+    }
+
     for (int i = 0; i < players; ++i) {
         machines[i].thread = std::thread(
-            machine_thread, &machines[i], i == audio_player ? &audio : nullptr);
+            machine_thread, &machines[i], i == audio_player ? &audio : nullptr,
+            &cable);
     }
 
     // --- window -----------------------------------------------------------
@@ -510,7 +536,7 @@ int main(int argc, char** argv) {
         // players would swap places mid-game.
         m.stop.store(false);
         m.thread = std::thread(machine_thread, &m,
-                               i == audio_player ? &audio : nullptr);
+                               i == audio_player ? &audio : nullptr, &cable);
         status = "Player " + std::to_string(i + 1) + ": " +
                  (new_rom.empty() ? std::string("BIOS, no cartridge")
                                   : std::filesystem::path(new_rom).stem().string());
@@ -914,7 +940,10 @@ int main(int argc, char** argv) {
     g_quit.store(true);
     // Before the joins, not after: a machine parked in a stalled run_frame()
     // never reaches the top of its loop to notice.
-    for (int i = 0; i < players; ++i) machines[i].gba.shutdown_link();
+    for (int i = 0; i < players; ++i) {
+        machines[i].gba.shutdown_link();
+        machines[i].gba.wake_cable();   // release anyone parked on the cable
+    }
     for (int i = 0; i < players; ++i)
         if (machines[i].thread.joinable()) machines[i].thread.join();
 

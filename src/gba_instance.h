@@ -38,6 +38,8 @@ void install_logger(bool verbose);
 // untagged, which is the default.
 void set_log_player(int player);
 
+class CableGroup;
+
 class GbaInstance {
 public:
     // The real thing, unwidened. The recompiler's 284-column view was a
@@ -126,6 +128,35 @@ public:
     // without freeing a descriptor the other thread is still holding.
     void shutdown_link();
 
+    // --- The link cable between our own machines ---------------------------
+    //
+    // Mutually exclusive with the Dolphin link, because a GBA has one serial
+    // port and mGBA has one driver slot per core. Call from the core's own
+    // thread, before the run loop, like attach().
+    //
+    // `preferred_id` is the position on the cable this machine would like,
+    // which is its quadrant, so that player one is the parent.
+    void attach_cable(CableGroup* group, int preferred_id);
+
+    // Block while the coordinator has this machine asleep.
+    //
+    // The coordinator stops a machine that has run ahead by marking it asleep
+    // and forcing its CPU out of the run loop, so run_frame() returns early
+    // and this is where the waiting actually happens. Call it from the core's
+    // own thread, straight after run_frame(), and hold no lock the other
+    // machines want.
+    void cable_wait();
+
+    // Release a machine parked in cable_wait(), from another thread, so it can
+    // be joined. Same job as shutdown_link() does for Dolphin.
+    void wake_cable();
+
+    bool on_cable() const;
+
+    // Defined in the implementation; named here only so the coordinator's
+    // callbacks, which are free functions, can reach it.
+    struct Cable;
+
     // Whether the far end is still there. Call it from the core's own thread.
     //
     // mGBA's driver does not notice a link that has gone away: on end-of-file
@@ -178,6 +209,8 @@ private:
 
     struct Link;
     Link* link_ = nullptr;
+
+    Cable* cable_ = nullptr;
     uint32_t modes_seen_ = 0;
 };
 

@@ -15,6 +15,7 @@ const char* link_state_name(LinkState s) {
         case LinkState::Waiting:  return "waiting";
         case LinkState::Linked:   return "linked";
         case LinkState::Lost:     return "lost";
+        case LinkState::Cable:    return "cable";
     }
     return "?";
 }
