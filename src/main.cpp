@@ -50,6 +50,13 @@ std::atomic<bool> g_quit{false};
 // The one place the core thread and the host thread meet.
 struct Screen {
     std::mutex mutex;
+    // Diagnostics the core thread publishes for the report on the host thread.
+    std::atomic<bool> joybus{false};
+    std::atomic<bool> link_up{false};
+    std::atomic<int> activity{0};
+    std::atomic<int> sio_mode{-1};
+    std::atomic<uint16_t> rcnt{0};
+    std::atomic<uint32_t> modes{0};
     std::vector<uint32_t> pixels;   // ABGR8888, kWidth * kHeight
     bool has_frame = false;
     std::atomic<uint64_t> frames{0};
@@ -158,6 +165,7 @@ void core_thread(const std::string& rom, const std::string& bios,
     while (!g_quit.load(std::memory_order_relaxed)) {
         gba.set_keys(keys->load(std::memory_order_relaxed));
         gba.run_frame();
+        gba.note_sio_mode();
         ++frame;
 
         const std::size_t got = gba.drain_audio(sink.data(), sink.size() / 2);
@@ -170,6 +178,14 @@ void core_thread(const std::string& rom, const std::string& bios,
             screen->has_frame = true;
         }
         screen->frames.store(frame, std::memory_order_relaxed);
+        screen->joybus.store(gba.joybus_active(), std::memory_order_relaxed);
+        screen->sio_mode.store(gba.sio_mode(), std::memory_order_relaxed);
+        screen->rcnt.store(gba.rcnt(), std::memory_order_relaxed);
+        screen->modes.store(gba.sio_modes_seen(), std::memory_order_relaxed);
+        screen->link_up.store(linked, std::memory_order_relaxed);
+        if ((frame & 0x1F) == 0)   // 2 Hz is plenty, and it walks the frame
+            screen->activity.store(gba.screen_activity(),
+                                   std::memory_order_relaxed);
 
         // Noticed here rather than trusted from startup: a link that was up
         // when we dialled can be gone a minute later, and it does not announce
@@ -373,11 +389,22 @@ int main(int argc, char** argv) {
                 now - last_report).count();
             const uint64_t f = screen.frames.load();
             const uint64_t drawn = draws - last_draws;
-            std::printf("%5.2fs  core %6.2f fps (%3.0f%% of a GBA)   "
-                        "host %5.1f fps   audio: %llu underruns, %llu drops\n",
+            std::printf("%5.2fs  core %6.2f fps (%3.0f%%)  host %5.1f fps  "
+                        "link %s  sio %d rcnt %04X seen[%s%s%s%s%s%s]  scr %d%%  "
+                        "audio: %llu underruns, %llu drops\n",
                         secs, (f - last_frames) / secs,
                         100.0 * ((f - last_frames) / secs) / 59.7275,
                         drawn / secs,
+                        screen.link_up.load() ? "up  " : "down",
+                        screen.sio_mode.load(),
+                        (unsigned)screen.rcnt.load(),
+                        (screen.modes.load() & (1u << 0))  ? "N8 "    : "",
+                        (screen.modes.load() & (1u << 1))  ? "N32 "   : "",
+                        (screen.modes.load() & (1u << 2))  ? "MULTI " : "",
+                        (screen.modes.load() & (1u << 3))  ? "UART "  : "",
+                        (screen.modes.load() & (1u << 8))  ? "GPIO "  : "",
+                        (screen.modes.load() & (1u << 12)) ? "JOYBUS" : "",
+                        screen.activity.load(),
                         (unsigned long long)audio.underruns.load(),
                         (unsigned long long)audio.dropped.load());
             std::fflush(stdout);

@@ -130,6 +130,34 @@ public:
     // rather than one that has stopped, so it has to be detected out here.
     bool link_alive() const;
 
+    // Whether the guest has put its serial port in JOY bus mode.
+    //
+    // This is the question to ask first when a link looks connected but
+    // nothing happens. mGBA's driver answers Dolphin's JOY commands only while
+    // the guest is in this mode — otherwise it reads the command, sends no
+    // reply, and both ends sit there looking healthy. A GBA waiting for a
+    // multiboot download is in JOY bus mode; a cartridge that never wants the
+    // link never enters it.
+    bool joybus_active() const;
+
+    // The raw serial mode and RCNT, for when "not JOY bus" is not a useful
+    // enough answer. JOY bus is mode 12, and RCNT[15:14] = 11 is what selects
+    // it.
+    int sio_mode() const;
+    uint16_t rcnt() const;
+
+    // Every serial mode the guest has been in since boot, as a bitmask of
+    // 1 << mode. Sampling the current mode once a frame would miss a JOY bus
+    // window that opens and closes inside one — and "did it ever get there"
+    // is the question, not "is it there now". Call from the core's thread.
+    uint32_t sio_modes_seen() const { return modes_seen_; }
+    void note_sio_mode();
+
+    // How much of the guest's screen is not black, in percent. A GBA holding a
+    // multiboot wait screen is not blank, and a core that never got past the
+    // BIOS is — which is otherwise hard to tell apart without looking.
+    int screen_activity() const;
+
 private:
     mCore* core_ = nullptr;
     VFile* rom_vf_ = nullptr;
@@ -144,6 +172,7 @@ private:
 
     struct Link;
     Link* link_ = nullptr;
+    uint32_t modes_seen_ = 0;
 };
 
 }  // namespace gql

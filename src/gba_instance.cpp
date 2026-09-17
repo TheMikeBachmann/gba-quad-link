@@ -229,6 +229,39 @@ bool GbaInstance::link_alive() const {
     return true;
 }
 
+bool GbaInstance::joybus_active() const {
+    if (!core_) return false;
+    const struct GBA* gba = static_cast<const struct GBA*>(core_->board);
+    return gba->sio.mode == GBA_SIO_JOYBUS;
+}
+
+int GbaInstance::sio_mode() const {
+    if (!core_) return -1;
+    return static_cast<int>(
+        static_cast<const struct GBA*>(core_->board)->sio.mode);
+}
+
+uint16_t GbaInstance::rcnt() const {
+    if (!core_) return 0;
+    return static_cast<const struct GBA*>(core_->board)->sio.rcnt;
+}
+
+void GbaInstance::note_sio_mode() {
+    const int m = sio_mode();
+    if (m >= 0 && m < 32) modes_seen_ |= 1u << m;
+}
+
+int GbaInstance::screen_activity() const {
+    if (video_.empty()) return 0;
+    std::size_t lit = 0;
+    // Every 37th pixel: a prime stride walks the whole frame without lining up
+    // with any tile or scanline boundary, and 2.7% of the screen is plenty to
+    // tell "black" from "not black".
+    for (std::size_t i = 0; i < video_.size(); i += 37)
+        if ((video_[i] & 0x00FFFFFFu) != 0) ++lit;
+    return static_cast<int>(100 * lit / (video_.size() / 37 + 1));
+}
+
 bool GbaInstance::linked() const {
     return link_ && link_->attached &&
            GBASIODolphinIsConnected(&link_->dol);
