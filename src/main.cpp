@@ -532,7 +532,10 @@ int main(int argc, char** argv) {
     while (!g_quit.load(std::memory_order_relaxed)) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (menu_open) ImGui_ImplSDL2_ProcessEvent(&ev);
+            // Either window being open means ImGui needs the events. Feeding
+            // them only while the controls menu was up left the setup window
+            // drawn, visible and completely unclickable.
+            if (menu_open || setup_open) ImGui_ImplSDL2_ProcessEvent(&ev);
             if (ev.type == SDL_QUIT) g_quit.store(true);
             if (ev.type == SDL_CONTROLLERDEVICEADDED) attach_pad(ev.cdevice.which);
             if (ev.type == SDL_CONTROLLERDEVICEREMOVED) detach_pad(ev.cdevice.which);
@@ -674,7 +677,7 @@ int main(int argc, char** argv) {
                     ImGui::PushID(3000 + p);
                     const std::string cart =
                         machines[p].rom_path.empty()
-                            ? std::string("— no cartridge (waiting for a link) —")
+                            ? std::string("(no cartridge - waiting for a link)")
                             : std::filesystem::path(machines[p].rom_path).stem().string();
                     char label[32];
                     std::snprintf(label, sizeof label, "Player %d", p + 1);
@@ -712,7 +715,7 @@ int main(int argc, char** argv) {
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 // Typing is the only practical way through a library this
                 // size; scrolling nine hundred entries with a stick is not.
-                ImGui::InputTextWithHint("##filter", "type to narrow…",
+                ImGui::InputTextWithHint("##filter", "type to narrow...",
                                          rom_filter, sizeof rom_filter);
                 const std::vector<int> hits = gql::filter_roms(roms, rom_filter);
                 ImGui::Text("%d of %d", (int)hits.size(), (int)roms.size());
@@ -746,7 +749,7 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowSize(ImVec2(680, 460), ImGuiCond_FirstUseEver);
             ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
             ImGui::TextUnformatted(
-                "The machines keep running — Dolphin is waiting on them. "
+                "The machines keep running - Dolphin is waiting on them. "
                 "F1 or Select+Start closes this.");
             ImGui::Separator();
 
@@ -757,7 +760,7 @@ int main(int argc, char** argv) {
                 for (int p = 0; p < players; ++p) {
                     const char* pn = pads[p] ? SDL_GameControllerName(pads[p]) : nullptr;
                     char h[80];
-                    std::snprintf(h, sizeof h, "P%d — %s", p + 1,
+                    std::snprintf(h, sizeof h, "P%d - %s", p + 1,
                                   pn ? pn : "no pad");
                     ImGui::TableSetupColumn(h);
                 }
@@ -772,7 +775,7 @@ int main(int argc, char** argv) {
                         const bool capturing =
                             capture_player == p && capture_button == b;
                         const std::string lbl =
-                            capturing ? "press…"
+                            capturing ? "press..."
                                       : controls.player[p].buttons[b].label();
                         if (ImGui::Button(lbl.c_str(), ImVec2(-FLT_MIN, 0)))
                             begin_capture(p, b);
@@ -784,7 +787,7 @@ int main(int argc, char** argv) {
 
             ImGui::Separator();
             ImGui::TextUnformatted(
-                "Controller — which physical pad drives each quadrant. "
+                "Controller - which physical pad drives each quadrant. "
                 "Binding a button from a pad also moves it here.");
             for (int p = 0; p < players; ++p) {
                 ImGui::PushID(2000 + p);

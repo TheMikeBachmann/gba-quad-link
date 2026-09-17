@@ -31,7 +31,7 @@ const char* button_name(int button) {
 std::string Binding::label() const {
     switch (source) {
         case Source::None:
-            return "—";
+            return "(unbound)";
         case Source::PadButton: {
             const char* n = SDL_GameControllerGetStringForButton(
                 static_cast<SDL_GameControllerButton>(code));
@@ -48,7 +48,7 @@ std::string Binding::label() const {
             return std::string("Key ") + (n && *n ? n : "?");
         }
     }
-    return "—";
+    return "(unbound)";
 }
 
 void Controls::reset_player(int p) {
