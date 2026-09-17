@@ -1,0 +1,20 @@
+# Build trees.
+build/
+build-*/
+
+# Copyrighted material. The BIOS dump and any commercial ROM are needed to run
+# this and are never part of it.
+roms/
+bios/
+*.gba
+*.bin
+!packaging/*.bin
+
+# Things the app writes at runtime, in case it is ever run from the repo.
+*.sav
+imgui.ini
+*.cfg
+
+# Packaged output and the tools fetched to build it.
+*.AppImage
+runtime-x86_64
