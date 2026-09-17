@@ -16,6 +16,7 @@ generally useful than that.
 |---|---|
 | Four separate games | Each quadrant takes its own cartridge and keeps its own battery save. |
 | Whoever you want, audible | Any combination of machines heard at once, with a volume each. |
+| Whoever is still playing | Hide the machines nobody is watching; the rest take the screen. |
 | Four on a link cable | Mario Kart, Kirby, anything that links. Grouped automatically by cartridge. |
 | Four to a GameCube | Four Swords Adventures. All four multiboot from Dolphin over TCP. |
 | One to a GameCube | Pac-Man Vs., the Tingle Tuner, Metroid Prime's Fusion link. |
@@ -126,8 +127,21 @@ an A/B/C/D override for the cases where that is wrong: the Mario Advance games
 all link to play Mario Bros., Pokémon versions trade between themselves, and
 single-pak multiplayer has one cartridge between four people.
 
-**Four screens tile to 3:2.** A 16:9 display has about eleven percent spare at
-each side, and it carries a status column per side — player, link state, frame
+**The screen belongs to whoever is using it.** Four people start an evening and
+three go to bed; the one still playing should not be left in a quarter of a
+television because of who they started with. The arrangement follows how many
+machines are on screen — one takes the window, two split it, three or four take
+the grid — and which way to split two is measured rather than chosen, because
+side by side wins on every widescreen and stacked wins on 4:3.
+
+Hiding a machine does not stop it. Someone stepping out for ten minutes comes
+back to their game where they left it, still linked and still in position on
+the cable, exactly as they would to a handheld left on the sofa. Stopping it
+would take it off the cable and renumber everybody still playing, which is a
+strange thing to do to four people because one of them went to make tea.
+
+**Four screens tile to 3:2**, so a 16:9 display has about eleven percent spare
+at each side. That carries a status column per side — player, link state, frame
 rate, pad — because what goes wrong here is mostly one of the four quietly not
 being connected, and that is otherwise invisible. Below 96px there is no room
 for a legible line, so they are dropped and the screens take the space.
