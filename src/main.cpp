@@ -588,7 +588,8 @@ int main(int argc, char** argv) {
     // The thread has to go first: the instance belongs to it, and reopening a
     // core underneath a thread that is running it is not a thing that can be
     // made safe.
-    const auto restart_machine = [&](int i, const std::string& new_rom) {
+    const auto restart_machine = [&](int i, const std::string& new_rom,
+                                     gql::LinkMode new_mode) {
         Machine& m = machines[i];
         m.stop.store(true);
         m.gba.shutdown_link();          // in case it is parked in a stall
@@ -597,6 +598,7 @@ int main(int argc, char** argv) {
 
         m.rom_path = new_rom;
         m.save_path = gql::save_path(new_rom, i);
+        m.mode = new_mode;
         std::string err;
         if (!m.gba.open(m.rom_path, bios_path, m.save_path, kHostSampleRate,
                         &err)) {
@@ -605,8 +607,18 @@ int main(int argc, char** argv) {
             return;
         }
         m.booted.store(true);
-        m.link.store(LinkState::Off);
         m.dialled = false;
+        // Joining the cable happens here, before the thread starts, for the
+        // same reason it does at startup: the coordinator renumbers everyone
+        // on every attach, and doing that to a machine that is mid-frame on
+        // its own thread is asking for the desynchronization we just spent an
+        // afternoon removing.
+        if (new_mode == gql::LinkMode::Cable) {
+            m.gba.attach_cable(&cable, i);
+            m.link.store(LinkState::Cable);
+        } else {
+            m.link.store(LinkState::Off);
+        }
         // Relinking is deliberately not attempted here. Dolphin hands out SI
         // slots in the order connections arrive, so a machine that reconnects
         // on its own would land in whatever slot happened to be next and the
@@ -807,7 +819,31 @@ int main(int argc, char** argv) {
                         rom_filter[0] = '\0';
                     }
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("clear")) restart_machine(p, "");
+                    if (ImGui::SmallButton("clear"))
+                        restart_machine(p, "", machines[p].mode);
+
+                    // What this machine's serial port is plugged into. A GBA
+                    // has one, so these are exclusive.
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(92.0f);
+                    static const char* kModes[] = {"solo", "cable", "dolphin"};
+                    int cur = static_cast<int>(machines[p].mode);
+                    if (ImGui::Combo("##mode", &cur, kModes, 3)) {
+                        const auto want = static_cast<gql::LinkMode>(cur);
+                        if (want != machines[p].mode) {
+                            if (want == gql::LinkMode::Dolphin) {
+                                // Dolphin hands out SI slots in the order
+                                // connections arrive, so one machine joining
+                                // on its own would take whichever slot came
+                                // next and move everyone else's player number.
+                                status = "Dolphin has to be joined by all "
+                                         "players at once, in order - restart "
+                                         "with --host";
+                            } else {
+                                restart_machine(p, machines[p].rom_path, want);
+                            }
+                        }
+                    }
 
                     // Handing the same cartridge to someone else is the common
                     // case — four people sitting down to the same game — and
@@ -829,7 +865,8 @@ int main(int argc, char** argv) {
                                 machines[q].rom_path == machines[p].rom_path;
                             ImGui::BeginDisabled(same);
                             if (ImGui::SmallButton(n))
-                                restart_machine(q, machines[p].rom_path);
+                                restart_machine(q, machines[p].rom_path,
+                                                machines[q].mode);
                             ImGui::EndDisabled();
                             if (same && ImGui::IsItemHovered(
                                     ImGuiHoveredFlags_AllowWhenDisabled))
@@ -847,7 +884,8 @@ int main(int argc, char** argv) {
                             for (int q = 0; q < players; ++q)
                                 if (q != p &&
                                     machines[q].rom_path != machines[p].rom_path)
-                                    restart_machine(q, machines[p].rom_path);
+                                    restart_machine(q, machines[p].rom_path,
+                                                    machines[q].mode);
                             status = "All players given " +
                                      std::filesystem::path(machines[p].rom_path)
                                          .stem().string();
@@ -901,7 +939,8 @@ int main(int argc, char** argv) {
                             const gql::RomEntry& e = roms[hits[n]];
                             ImGui::PushID(n);
                             if (ImGui::Selectable(e.display.c_str())) {
-                                restart_machine(browsing_for, e.path);
+                                restart_machine(browsing_for, e.path,
+                                                machines[browsing_for].mode);
                                 browsing_for = -1;
                             }
                             ImGui::PopID();
