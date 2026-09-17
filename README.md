@@ -15,6 +15,7 @@ generally useful than that.
 |  |  |
 |---|---|
 | Four separate games | Each quadrant takes its own cartridge and keeps its own battery save. |
+| Whoever you want, audible | Any combination of machines heard at once, with a volume each. |
 | Four on a link cable | Mario Kart, Kirby, anything that links. Grouped automatically by cartridge. |
 | Four to a GameCube | Four Swords Adventures. All four multiboot from Dolphin over TCP. |
 | One to a GameCube | Pac-Man Vs., the Tingle Tuner, Metroid Prime's Fusion link. |
@@ -40,20 +41,23 @@ are submodules; nothing else is needed.
 ## Running
 
 ```sh
-./build/gba-quad-link --bios path/to/gba_bios.bin --rom-dir path/to/roms
+./build/gba-quad-link --bios path/to/gba_bios.bin
 ```
 
-Then press **F2** and choose cartridges. Everything else has a sensible default.
+Then press **F1** and pick cartridges. Everything is in that menu, including a
+folder browser for finding your library, and it is all remembered — so after
+the first run there is nothing to pass on the command line at all, which is
+what makes the AppImage and a Steam shortcut work.
 
 | Flag | |
 |---|---|
 | `--bios PATH` | a real GBA BIOS dump |
-| `--rom-dir D` | where your cartridges live; `.gba`, `.zip` and `.7z` all work |
-| `--host H` | the machine Dolphin is running on |
+| `--rom-dir D` | where your cartridges live; `.gba`, `.zip` and `.7z` all work. Remembered. |
+| `--host H` | the machine Dolphin is running on. Remembered. |
 | `--players 1-4` | |
 | `--player N ...` | opens a section: `--rom` and `--link` after it apply to that player alone |
 | `--link cable\|dolphin` | |
-| `--audio-player N` | which quadrant is heard (default 1) |
+| `--audio-player N` | hear only this quadrant. The menu can hear any combination. |
 | `--fullscreen` `--scale N` `--integer-scale` | |
 | `--verbose` `--log-sio` | mGBA's log, or only what it says about the serial port |
 
@@ -64,13 +68,33 @@ the binary, in `~/.local/share/gba-quad-link/`, or wherever `--bios` points.
 
 | | |
 |---|---|
-| **F1** | controls — bind any button to a key or a pad, per player |
-| **F2** | setup — cartridges, cable groups, Dolphin |
+| **F1**, **F2**, or **Select+Start** | the menu |
 | **F3** | mirror one player's controls to all four |
-| **Select+Start** | opens both menus from a pad, for Game Mode |
+| **Escape** | quit |
+
+One menu, three tabs — **Games** for cartridges, cable groups and Dolphin,
+**Audio** for who is heard and how loudly, **Controls** for bindings and which
+pad drives which quadrant. Select+Start works from a pad because Game Mode has
+no keyboard, and a player whose buttons are wrong needs a way in that does not
+depend on the bindings being right.
 
 **F3** is for walking four machines through the same menus at once. Turn it off
 before anyone has to choose a character.
+
+### Sound
+
+One machine is heard by default, because four unrelated soundtracks layered
+over each other is genuinely unpleasant and no amount of mixing quality fixes
+that. It is a default rather than a rule: two people playing the same game is
+not noise, and wanting your own machine louder than your neighbour's is an
+ordinary thing to want. The Audio tab has a switch and a volume per player, and
+an **only** button for one click back to one machine.
+
+The mix is paced by the least-supplied machine, so nobody is padded with
+silence to keep up with whoever is furthest ahead — that padding is audible as
+chopping. A machine that has genuinely stopped is left out rather than allowed
+to hold up the rest. The drop counter on that tab should read zero; anything
+else means audio is being discarded.
 
 ### Without a Dolphin
 
@@ -107,6 +131,12 @@ each side, and it carries a status column per side — player, link state, frame
 rate, pad — because what goes wrong here is mostly one of the four quietly not
 being connected, and that is otherwise invisible. Below 96px there is no room
 for a legible line, so they are dropped and the screens take the space.
+
+**Nobody waits for the sound card.** Each machine fills a ring buffer from its
+own thread and the host thread mixes what is switched on. A machine linked to a
+GameCube is already being told when it may run; the sound card would be a
+second master pulling the other way. A machine that has run ahead drops its
+oldest audio rather than block, because it should be heard where it is now.
 
 ## Known limitations
 
