@@ -133,9 +133,7 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
     auto joybus_mark = std::chrono::steady_clock::time_point{};
     constexpr auto kJoybusHold = std::chrono::milliseconds(750);
 
-    // Refreshed with the frame rate rather than every frame: reading it means
-    // looking the player up in the coordinator's table.
-    int cable_pid = -1;
+
 
     while (!g_quit.load(std::memory_order_relaxed) &&
            !me->stop.load(std::memory_order_relaxed)) {
@@ -195,7 +193,7 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
                           std::memory_order_relaxed);
             fps_mark = now;
             fps_frame = frame;
-            if (me->gba.on_cable()) cable_pid = me->gba.cable_player_id();
+
         }
 
         // On the cable, only the parent is paced. The coordinator already
@@ -208,7 +206,10 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
         // on, in a different costume: a child asleep at the wrong moment is a
         // child that cannot take part in the transfer the parent is running,
         // and the game sees a cable with nobody on the end of it.
-        const bool cable_child = me->gba.on_cable() && cable_pid > 0;
+        // Read every frame now that it is a plain atomic kept current by the
+        // coordinator, so a change of parent is picked up immediately.
+        const bool cable_child = me->gba.on_cable() &&
+                                 me->gba.cable_player_id() > 0;
         if (linked || cable_child) {
             deadline = now;
         } else {
@@ -270,11 +271,10 @@ int main(int argc, char** argv) {
         }
         else if (a == "--link") {
             const std::string m = next();
-            gql::LinkMode mode = gql::LinkMode::None;
-            if (m == "cable") mode = gql::LinkMode::Cable;
-            else if (m == "dolphin") mode = gql::LinkMode::Dolphin;
-            else if (m != "none") {
-                std::fprintf(stderr, "--link takes none, cable or dolphin\n");
+            gql::LinkMode mode = gql::LinkMode::Cable;
+            if (m == "dolphin") mode = gql::LinkMode::Dolphin;
+            else if (m != "cable") {
+                std::fprintf(stderr, "--link takes cable or dolphin\n");
                 return 2;
             }
             if (section >= 0) {
@@ -472,31 +472,44 @@ int main(int argc, char** argv) {
                     machines[i].save_path.empty() ? "" : "  (save kept)");
     }
 
+    // Before anything reads a mode. Applying these after the dialling and the
+    // cable attach meant every machine still held its default when the two
+    // things that care about modes ran, so a machine asked for Dolphin was
+    // never dialled and then excluded from the cable for wanting Dolphin —
+    // ending up attached to nothing at all.
+    for (int i = 0; i < players; ++i)
+        if (per_mode_set[i]) machines[i].mode = per_mode[i];
+
     if (!host.empty()) {
+        // A host and no per-player choice means everyone is going to the
+        // GameCube, which is what Four Swords Adventures wants.
+        bool any_named = false;
+        for (int i = 0; i < players; ++i) if (per_mode_set[i]) any_named = true;
+        if (!any_named)
+            for (int i = 0; i < players; ++i)
+                machines[i].mode = gql::LinkMode::Dolphin;
+
         // In player order, one at a time. Dolphin assigns the connections it
-        // accepts to SI slots in the order they arrive, so dialling four at
+        // accepts to SI slots in the order they arrive, so dialling several at
         // once would scatter the players across the GameCube's ports at
         // random — and the scatter would differ every run.
         for (int i = 0; i < players; ++i) {
+            if (machines[i].mode != gql::LinkMode::Dolphin) continue;
             std::string err;
             machines[i].link.store(LinkState::Dialling);
             if (machines[i].gba.dial(host, data_port, clock_port, &err)) {
                 machines[i].dialled = true;
-                std::printf("p%d link: connected to %s -> SI slot %d\n",
-                            i + 1, host.c_str(), i + 1);
+                std::printf("p%d link: connected to %s\n", i + 1, host.c_str());
             } else {
+                // Falls back to the cable rather than to nothing, so the mode
+                // the menu shows is the mode the machine is actually in.
+                machines[i].mode = gql::LinkMode::Cable;
                 machines[i].link.store(LinkState::Off);
                 std::printf("p%d link: %s\n", i + 1, err.c_str());
             }
             std::fflush(stdout);
         }
     }
-
-    for (int i = 0; i < players; ++i)
-        if (per_mode_set[i]) machines[i].mode = per_mode[i];
-    if (cable_all)
-        for (int i = 0; i < players; ++i)
-            machines[i].mode = gql::LinkMode::Cable;
 
     {
         int on_cable = 0;
@@ -629,12 +642,13 @@ int main(int argc, char** argv) {
                 status = "Player " + std::to_string(i + 1) +
                          " joined Dolphin";
             } else {
-                m.link.store(LinkState::Off);
-                m.mode = gql::LinkMode::None;
+                // Back on the cable, not nowhere, so what the menu says
+                // stays true.
+                m.mode = gql::LinkMode::Cable;
+                m.gba.attach_cable(&cable, i);
+                m.link.store(LinkState::Cable);
                 status = "Player " + std::to_string(i + 1) + ": " + lerr;
             }
-        } else {
-            m.link.store(LinkState::Off);
         }
         // Relinking is deliberately not attempted here. Dolphin hands out SI
         // slots in the order connections arrive, so a machine that reconnects
@@ -850,7 +864,6 @@ int main(int argc, char** argv) {
                     // sent it to a Dolphin that was not there.
                     struct ModeChoice { const char* label; gql::LinkMode mode; };
                     static const ModeChoice kModes[] = {
-                        {"solo",    gql::LinkMode::None},
                         {"cable",   gql::LinkMode::Cable},
                         {"dolphin", gql::LinkMode::Dolphin},
                     };
@@ -1117,7 +1130,9 @@ int main(int argc, char** argv) {
         if (now - last_report >= std::chrono::seconds(5)) {
             std::printf("fps:");
             for (int i = 0; i < players; ++i) {
-                std::printf(" p%d %5.2f/%s", i + 1, machines[i].fps.load(),
+                std::printf(" p%d %5.2f %s/%s", i + 1, machines[i].fps.load(),
+                            machines[i].mode == gql::LinkMode::Dolphin
+                                ? "dol" : "cab",
                             gql::link_state_name(machines[i].link.load()));
                 if (machines[i].mode == gql::LinkMode::Cable)
                     std::printf("[id%u pid%d dev%d sio%d rcnt%04X slp%lu]",

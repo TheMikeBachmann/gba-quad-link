@@ -161,6 +161,15 @@ struct GbaInstance::Cable {
     // only for the waiting itself.
     std::atomic<bool> asleep{false};
     unsigned long sleeps = 0;
+
+    // Where this machine actually sits on the cable, which is not its
+    // quadrant: the coordinator packs whoever is attached into positions from
+    // zero with no gaps, and renumbers on every join and departure. Kept
+    // current by the callback rather than polled, because the moment it
+    // changes is the moment a different machine has to start carrying the
+    // pace, and a second of nobody doing that is a second of everyone
+    // running as fast as they can.
+    std::atomic<int> player_id{-1};
     bool leaving = false;      // shutting down; never sleep again
     int preferred_id = -1;
     bool attached = false;
@@ -194,6 +203,10 @@ int cable_requested_id(struct mLockstepUser* user) {
     return cable_of(user)->preferred_id;
 }
 
+void cable_player_id_changed(struct mLockstepUser* user, int id) {
+    cable_of(user)->player_id.store(id, std::memory_order_relaxed);
+}
+
 }  // namespace
 
 void GbaInstance::attach_cable(CableGroup* group, int preferred_id) {
@@ -206,6 +219,7 @@ void GbaInstance::attach_cable(CableGroup* group, int preferred_id) {
     cable_->user.sleep = cable_sleep;
     cable_->user.wake = cable_wake;
     cable_->user.requestedId = cable_requested_id;
+    cable_->user.playerIdChanged = cable_player_id_changed;
 
     GBASIOLockstepDriverCreate(&cable_->driver, &cable_->user);
     GBASIOLockstepCoordinatorAttach(
@@ -249,13 +263,9 @@ int GbaInstance::cable_devices() const {
 }
 
 int GbaInstance::cable_player_id() const {
-    if (!cable_ || !cable_->driver.lockstepId) return -1;
-    struct GBASIOLockstepCoordinator* c = cable_->driver.coordinator;
-    if (!c) return -1;
-    struct GBASIOLockstepPlayer* p =
-        (struct GBASIOLockstepPlayer*) TableLookup(&c->players,
-                                                   cable_->driver.lockstepId);
-    return p ? p->playerId : -1;
+    // From the callback, not by reaching into the coordinator's table, which
+    // another machine's thread may be rearranging as we read it.
+    return cable_ ? cable_->player_id.load(std::memory_order_relaxed) : -1;
 }
 
 unsigned long GbaInstance::cable_sleeps() const {
