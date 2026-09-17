@@ -1336,7 +1336,8 @@ int main(int argc, char** argv) {
             for (int i = 0; i < players; ++i) {
                 std::printf(" p%d %5.2f %s/%s", i + 1, machines[i].fps.load(),
                             machines[i].mode == gql::LinkMode::Dolphin
-                                ? "dol" : "cab",
+                                ? (machines[i].gba.link_starved() ? "DOL?" : "dol")
+                            : "cab",
                             gql::link_state_name(machines[i].link.load()));
                 if (machines[i].mode == gql::LinkMode::Cable)
                     std::printf("[id%u pid%d dev%d sio%d rcnt%04X slp%lu]",

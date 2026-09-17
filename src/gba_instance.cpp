@@ -511,6 +511,14 @@ int GbaInstance::screen_activity() const {
     return static_cast<int>(100 * lit / (video_.size() / 37 + 1));
 }
 
+bool GbaInstance::link_starved() const {
+    if (!link_ || !link_->attached) return false;
+    // Ten frames of unreplenished budget. A healthy link never approaches
+    // this; a silent one passes it almost immediately and keeps going.
+    const int32_t kStarved = -(VIDEO_TOTAL_LENGTH * 10);
+    return link_->dol.clockSlice < kStarved;
+}
+
 bool GbaInstance::linked() const {
     return link_ && link_->attached &&
            GBASIODolphinIsConnected(&link_->dol);

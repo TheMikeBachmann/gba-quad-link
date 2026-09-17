@@ -192,6 +192,20 @@ public:
     // rather than one that has stopped, so it has to be detected out here.
     bool link_alive() const;
 
+    // Whether the far end is connected but not actually granting cycles.
+    //
+    // These are different things and conflating them is expensive. Dolphin's
+    // connection waiter accepts every GBA that dials in, but only a SI port
+    // configured for one ever consumes a connection — so a game using one GBA
+    // leaves the other three holding live sockets that nothing will ever speak
+    // on. They are connected, they are not being paced, and with their ceiling
+    // lifted on the strength of being "linked" they run at thirty times speed.
+    //
+    // The driver's own cycle budget says which it is: it goes up as Dolphin
+    // grants and down as the guest spends, so it hovers near zero on a healthy
+    // link and falls without bound on a silent one.
+    bool link_starved() const;
+
     // Whether the guest has put its serial port in JOY bus mode.
     //
     // This is the question to ask first when a link looks connected but
