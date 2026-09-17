@@ -21,6 +21,12 @@ namespace gql {
 struct Settings {
     std::string rom_dir;   // where the cartridge library lives
     std::string host;      // the machine Dolphin runs on
+
+    // Which machines are heard, and how loudly. One machine at full volume is
+    // the arrangement that makes sense on a first run — four unrelated games
+    // at once really is noise — but it is a default, not a rule.
+    bool audio_on[4] = {true, false, false, false};
+    float audio_gain[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 // Missing file is not a failure; it just leaves the defaults alone.

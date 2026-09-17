@@ -34,6 +34,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio.h"
 #include "cable.h"
 #include "controls.h"
 #include "gba_instance.h"
@@ -64,40 +65,10 @@ std::atomic<bool> g_quit{false};
 // so pausing here would freeze the game for everyone.
 std::atomic<bool> g_input_held{false};
 
-struct AudioOut {
-    SDL_AudioDeviceID dev = 0;
-    bool started = false;           // producer thread only
-    std::atomic<uint64_t> underruns{0};
-    std::atomic<uint64_t> dropped{0};
-
-    // Bytes at 48000 Hz stereo S16 — four per frame.
-    static constexpr Uint32 kPrerollBytes = 24000;    // 125 ms
-    static constexpr Uint32 kCeilingBytes = 76800;    // 400 ms
-
-    void push(const int16_t* samples, std::size_t frames) {
-        if (!dev || frames == 0) return;
-        const Uint32 queued = SDL_GetQueuedAudioSize(dev);
-        if (started && queued == 0) {
-            started = false;
-            underruns.fetch_add(1, std::memory_order_relaxed);
-            SDL_PauseAudioDevice(dev, 1);
-        }
-        if (queued > kCeilingBytes) {
-            dropped.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        SDL_QueueAudio(dev, samples,
-                       static_cast<Uint32>(frames * 2 * sizeof(int16_t)));
-        if (!started && SDL_GetQueuedAudioSize(dev) >= kPrerollBytes) {
-            started = true;
-            SDL_PauseAudioDevice(dev, 0);
-        }
-    }
-};
 
 // Runs one machine until told to stop. The instance was opened and dialled by
 // the host thread; from here on it belongs to this one.
-void machine_thread(Machine* me, AudioOut* audio) {
+void machine_thread(Machine* me, gql::AudioMixer* mixer) {
     gql::set_log_player(me->index);
 
     if (me->mode == gql::LinkMode::Cable)
@@ -149,11 +120,11 @@ void machine_thread(Machine* me, AudioOut* audio) {
         me->gba.note_sio_mode();
         if (completed) ++frame;
 
+        // Every machine is drained whether or not anyone is listening — an
+        // undrained core backs up — but the mixer decides what is heard.
         const std::size_t got = me->gba.drain_audio(sink.data(),
                                                     sink.size() / 2);
-        // Every machine's mixer is drained whether or not anyone is listening;
-        // only the one holding the speakers passes the samples on.
-        if (audio) audio->push(sink.data(), got);
+        if (mixer) mixer->push(me->index, sink.data(), got);
 
         if (completed) {
             std::lock_guard<std::mutex> lk(me->fb_mutex);
@@ -252,7 +223,7 @@ int main(int argc, char** argv) {
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
-    int audio_player = 0;
+    int audio_player_arg = -1;   // -1: use the remembered selection
 
     // --player N opens a section: flags after it apply to that machine alone,
     // until the next --player. Before any section they set the default for
@@ -313,7 +284,8 @@ int main(int argc, char** argv) {
         else if (a == "--fullscreen") fullscreen = true;
         else if (a == "--integer-scale") integer_scale = true;
         else if (a == "--verbose") verbose = true;
-        else if (a == "--audio-player") audio_player = std::atoi(next()) - 1;
+        else if (a == "--audio-player")
+            audio_player_arg = std::atoi(next()) - 1;
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
@@ -333,7 +305,7 @@ int main(int argc, char** argv) {
     }
     players = std::clamp(players, 1, kMaxPlayers);
     if (scale < 1) scale = 1;
-    if (audio_player < 0 || audio_player >= players) audio_player = 0;
+    if (audio_player_arg >= players) audio_player_arg = 0;
     gql::install_logger(verbose);
     if (log_sio) gql::log_only_sio();
 
@@ -372,20 +344,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    AudioOut audio;
+    gql::AudioMixer mixer;
+    if (!mixer.open(kHostSampleRate))
+        std::fprintf(stderr, "audio: %s — running silent\n", SDL_GetError());
+    for (int i = 0; i < kMaxPlayers; ++i) {
+        mixer.set_enabled(i, settings.audio_on[i]);
+        mixer.set_gain(i, settings.audio_gain[i]);
+    }
+    // --audio-player still means "only this one", which is what it always
+    // meant, and is now one arrangement of many rather than the only one.
+    if (audio_player_arg >= 0) {
+        for (int i = 0; i < kMaxPlayers; ++i)
+            mixer.set_enabled(i, i == audio_player_arg);
+    }
     {
-        SDL_AudioSpec want{};
-        want.freq = kHostSampleRate;
-        want.format = AUDIO_S16SYS;
-        want.channels = 2;
-        want.samples = 1024;
-        SDL_AudioSpec got{};
-        audio.dev = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);
-        if (!audio.dev)
-            std::fprintf(stderr, "audio: %s — running silent\n", SDL_GetError());
-        else
-            std::printf("audio: player %d heard, %d Hz %d channels\n",
-                        audio_player + 1, got.freq, got.channels);
+        int on = 0;
+        for (int i = 0; i < kMaxPlayers; ++i) if (mixer.enabled(i)) ++on;
+        std::printf("audio: %d Hz, %d machine%s heard\n", kHostSampleRate,
+                    on, on == 1 ? "" : "s");
     }
 
     SDL_GameController* pads[kMaxPlayers] = {nullptr, nullptr, nullptr, nullptr};
@@ -685,7 +661,7 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < players; ++i) {
         machines[i].thread = std::thread(
-            machine_thread, &machines[i], i == audio_player ? &audio : nullptr);
+            machine_thread, &machines[i], &mixer);
     }
 
     // --- window -----------------------------------------------------------
@@ -724,7 +700,6 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     bool menu_open = false;
-    bool setup_open = false;
     bool mirror_input = mirror_start;
     int capture_player = -1, capture_button = -1;
     std::string status;
@@ -820,7 +795,7 @@ int main(int argc, char** argv) {
         // players would swap places mid-game.
         m.stop.store(false);
         m.thread = std::thread(machine_thread, &m,
-                               i == audio_player ? &audio : nullptr);
+                               &mixer);
         status = "Player " + std::to_string(i + 1) + ": " +
                  (new_rom.empty() ? std::string("BIOS, no cartridge")
                                   : std::filesystem::path(new_rom).stem().string());
@@ -884,7 +859,7 @@ int main(int argc, char** argv) {
             // Either window being open means ImGui needs the events. Feeding
             // them only while the controls menu was up left the setup window
             // drawn, visible and completely unclickable.
-            if (menu_open || setup_open) ImGui_ImplSDL2_ProcessEvent(&ev);
+            if (menu_open) ImGui_ImplSDL2_ProcessEvent(&ev);
             if (ev.type == SDL_QUIT) g_quit.store(true);
             if (ev.type == SDL_CONTROLLERDEVICEADDED) attach_pad(ev.cdevice.which);
             if (ev.type == SDL_CONTROLLERDEVICEREMOVED) detach_pad(ev.cdevice.which);
@@ -903,8 +878,7 @@ int main(int argc, char** argv) {
                         // One shortcut, both windows: Game Mode has no second
                         // key to press, and a player who cannot work out
                         // which one they want can see both.
-                        const bool any = menu_open || setup_open;
-                        menu_open = setup_open = !any;
+                        menu_open = !menu_open;
                         status.clear();
                         continue;
                     }
@@ -949,8 +923,10 @@ int main(int argc, char** argv) {
 
             if (ev.type == SDL_KEYDOWN) {
                 const SDL_Scancode sc = ev.key.keysym.scancode;
-                if (sc == SDL_SCANCODE_F1) { menu_open = !menu_open; status.clear(); }
-                else if (sc == SDL_SCANCODE_F2) { setup_open = !setup_open; status.clear(); }
+                if (sc == SDL_SCANCODE_F1 || sc == SDL_SCANCODE_F2) {
+                    menu_open = !menu_open;
+                    status.clear();
+                }
                 else if (sc == SDL_SCANCODE_F3) {
                     mirror_input = !mirror_input;
                     std::printf("mirrored input: %s\n",
@@ -1030,9 +1006,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (setup_open) {
-            ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_FirstUseEver);
-            ImGui::Begin("Setup", nullptr, ImGuiWindowFlags_NoCollapse);
+        if (menu_open) {
+            ImGui::SetNextWindowSize(ImVec2(790, 560), ImGuiCond_FirstUseEver);
+            ImGui::Begin("gba-quad-link", nullptr, ImGuiWindowFlags_NoCollapse);
+            ImGui::TextUnformatted(
+                "The machines keep running - Dolphin and the cable are waiting "
+                "on them. F1 or Select+Start closes this.");
+            ImGui::Separator();
+            ImGui::BeginTabBar("tabs");
+            if (ImGui::BeginTabItem("Games")) {
 
             if (browsing_for < 0 && browsing_dir.empty()) {
                 ImGui::TextUnformatted("What each player is running. "
@@ -1323,20 +1305,53 @@ int main(int argc, char** argv) {
                 }
                 ImGui::EndChild();
             }
-            if (!status.empty()) {
-                ImGui::Separator();
-                ImGui::TextUnformatted(status.c_str());
+            ImGui::EndTabItem();
             }
-            ImGui::End();
-        }
 
-        if (menu_open) {
-            ImGui::SetNextWindowSize(ImVec2(680, 460), ImGuiCond_FirstUseEver);
-            ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
-            ImGui::TextUnformatted(
-                "The machines keep running - Dolphin is waiting on them. "
-                "F1 or Select+Start closes this.");
-            ImGui::Separator();
+            if (ImGui::BeginTabItem("Audio")) {
+                ImGui::TextWrapped(
+                    "Which machines you hear, and how loud. Four unrelated "
+                    "games at once is noise, which is why one is the default - "
+                    "but two people playing the same game is not, and neither "
+                    "is wanting your own machine louder than the rest.");
+                ImGui::Separator();
+                for (int p = 0; p < players; ++p) {
+                    ImGui::PushID(4000 + p);
+                    char lbl[32];
+                    std::snprintf(lbl, sizeof lbl, "Player %d", p + 1);
+                    bool on = mixer.enabled(p);
+                    if (ImGui::Checkbox(lbl, &on)) {
+                        mixer.set_enabled(p, on);
+                        settings.audio_on[p] = on;
+                        remember();
+                    }
+                    ImGui::SameLine(120.0f);
+                    float g = mixer.gain(p);
+                    ImGui::BeginDisabled(!on);
+                    ImGui::SetNextItemWidth(360.0f);
+                    if (ImGui::SliderFloat("##gain", &g, 0.0f, 2.0f, "%.2fx")) {
+                        mixer.set_gain(p, g);
+                        settings.audio_gain[p] = g;
+                        remember();
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("only")) {
+                        for (int q = 0; q < players; ++q) {
+                            mixer.set_enabled(q, q == p);
+                            settings.audio_on[q] = (q == p);
+                        }
+                        remember();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                ImGui::Text("%lu underruns, %lu dropped blocks",
+                            mixer.underruns(), mixer.drops());
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Controls")) {
 
             if (ImGui::BeginTable("binds", players + 1,
                                   ImGuiTableFlags_Borders |
@@ -1422,12 +1437,16 @@ int main(int argc, char** argv) {
                 controls.reset_to_defaults();
                 status = "All players reset to defaults";
             }
-            ImGui::SameLine();
+            ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+
+            ImGui::Separator();
             // Escape closes the window; Game Mode has no keyboard and no title
             // bar, so this is the only way out from a controller.
             if (ImGui::Button("Quit")) g_quit.store(true);
             if (!status.empty()) {
-                ImGui::Separator();
+                ImGui::SameLine();
                 ImGui::TextUnformatted(status.c_str());
             }
             ImGui::End();
@@ -1435,6 +1454,7 @@ int main(int argc, char** argv) {
 
         ImGui::Render();
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
+        mixer.pump();
         SDL_RenderPresent(ren);
 
         const auto now = std::chrono::steady_clock::now();
@@ -1459,8 +1479,8 @@ int main(int argc, char** argv) {
                                     machines[i].gba.cable_timeouts());
             }
             std::printf("   audio: %llu underruns, %llu drops\n",
-                        (unsigned long long)audio.underruns.load(),
-                        (unsigned long long)audio.dropped.load());
+                        (unsigned long long)mixer.underruns(),
+                        (unsigned long long)mixer.drops());
             std::fflush(stdout);
             last_report = now;
         }
@@ -1483,7 +1503,7 @@ int main(int argc, char** argv) {
         if (textures[i]) SDL_DestroyTexture(textures[i]);
         if (pads[i]) SDL_GameControllerClose(pads[i]);
     }
-    if (audio.dev) SDL_CloseAudioDevice(audio.dev);
+    mixer.close();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
