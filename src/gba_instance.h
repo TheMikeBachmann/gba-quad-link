@@ -89,6 +89,38 @@ public:
 
     bool open_ok() const { return core_ != nullptr; }
 
+    // --- The Dolphin link -------------------------------------------------
+    //
+    // Two calls, because the two halves belong to different threads and the
+    // order of both matters.
+    //
+    // dial() opens the pair of sockets and nothing else. It is called from the
+    // host thread, once per instance, *in player order*: Dolphin assigns the
+    // connections it accepts to SI slots in the order they arrive, so dialling
+    // four at once from four threads shuffles the players between quadrants at
+    // random.
+    //
+    // attach() hands the connected driver to the core, and must run on the
+    // thread that owns the core because it schedules against the core's own
+    // timing. It must also come after dial() succeeded: mGBA's driver gives up
+    // permanently if its first timing event finds no socket — it returns
+    // without rescheduling itself, and nothing ever winds it up again.
+    bool dial(const std::string& host, uint16_t data_port, uint16_t clock_port,
+              std::string* err);
+    void attach();
+    bool linked() const;
+
+    // Break the link from *another* thread, to get the core thread out of a
+    // stalled run_frame().
+    //
+    // When Dolphin stops granting cycles, mGBA's driver waits for more and
+    // run_frame() never returns — so a core thread parked in a stall cannot be
+    // joined, and the app hangs on the way out instead of quitting. Shutting
+    // the sockets down makes the waiting read fail, the driver gives up, and
+    // the frame finishes. shutdown() rather than close(): it wakes the reader
+    // without freeing a descriptor the other thread is still holding.
+    void shutdown_link();
+
 private:
     mCore* core_ = nullptr;
     VFile* rom_vf_ = nullptr;
@@ -100,6 +132,9 @@ private:
     struct Audio;
     Audio* audio_ = nullptr;
     unsigned host_rate_ = 0;
+
+    struct Link;
+    Link* link_ = nullptr;
 };
 
 }  // namespace gql

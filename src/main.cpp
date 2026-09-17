@@ -94,11 +94,21 @@ struct AudioOut {
 
 // Runs the core to completion on this thread. The instance is created here
 // rather than handed in: it belongs to whoever drives it.
+struct LinkArgs {
+    std::string host;       // empty: run unlinked and self-paced
+    uint16_t data_port = 54970;
+    uint16_t clock_port = 49420;
+};
+
 void core_thread(const std::string& rom, const std::string& bios,
                  Screen* screen, AudioOut* audio,
-                 std::atomic<uint16_t>* keys) {
+                 std::atomic<uint16_t>* keys, LinkArgs link,
+                 std::atomic<GbaInstance*>* expose) {
     gql::set_log_player(0);
     GbaInstance gba;
+    // Published so the host thread can break the link on the way out. It must
+    // not touch the instance for anything else.
+    expose->store(&gba, std::memory_order_release);
     std::string err;
     if (!gba.open(rom, bios, kHostSampleRate, &err)) {
         std::fprintf(stderr, "core: %s\n", err.c_str());
@@ -110,13 +120,30 @@ void core_thread(const std::string& rom, const std::string& bios,
                 gba.core_sample_rate(), kHostSampleRate);
     std::fflush(stdout);
 
+    // The link, if there is one. Dialled on this thread because there is only
+    // one core at this milestone; with four it moves to the host thread, which
+    // has to dial them in player order to pin the SI slots.
+    bool linked = false;
+    if (!link.host.empty()) {
+        std::string lerr;
+        if (gba.dial(link.host, link.data_port, link.clock_port, &lerr)) {
+            gba.attach();
+            linked = true;
+            std::printf("link: connected to %s (data %u, clock %u)\n",
+                        link.host.c_str(), link.data_port, link.clock_port);
+        } else {
+            std::printf("link: %s — running unlinked\n", lerr.c_str());
+        }
+        std::fflush(stdout);
+    }
+
     std::vector<int16_t> sink(4096 * 2);
     const auto started = std::chrono::steady_clock::now();
     uint64_t frame = 0;
 
-    // Self-paced, for now. This is the line that inverts once the clock socket
-    // is attached: Dolphin grants cycles and the core waits for them inside
-    // run_frame(), and pacing here would fight it.
+    // Only when nothing else is setting the pace. Linked, Dolphin grants
+    // cycles over the clock socket and the core waits for them inside
+    // run_frame(); pacing here as well would fight it and stall the link.
     constexpr double kFrameSeconds = 1.0 / 59.7275;
 
     while (!g_quit.load(std::memory_order_relaxed)) {
@@ -135,10 +162,13 @@ void core_thread(const std::string& rom, const std::string& bios,
         }
         screen->frames.store(frame, std::memory_order_relaxed);
 
-        std::this_thread::sleep_until(
-            started + std::chrono::duration_cast<
-                          std::chrono::steady_clock::duration>(
-                          std::chrono::duration<double>(kFrameSeconds * frame)));
+        if (!linked) {
+            std::this_thread::sleep_until(
+                started + std::chrono::duration_cast<
+                              std::chrono::steady_clock::duration>(
+                              std::chrono::duration<double>(
+                                  kFrameSeconds * frame)));
+        }
     }
 }
 
@@ -152,6 +182,7 @@ int main(int argc, char** argv) {
     bool fullscreen = false;
     bool integer_scale = false;
     bool verbose = false;
+    LinkArgs link;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -164,10 +195,16 @@ int main(int argc, char** argv) {
         else if (a == "--fullscreen") fullscreen = true;
         else if (a == "--integer-scale") integer_scale = true;
         else if (a == "--verbose") verbose = true;
+        else if (a == "--host") link.host = next();
+        else if (a == "--data-port")
+            link.data_port = static_cast<uint16_t>(std::atoi(next()));
+        else if (a == "--clock-port")
+            link.clock_port = static_cast<uint16_t>(std::atoi(next()));
         else {
             std::fprintf(stderr,
                 "usage: %s [--rom P | --no-rom] [--bios P] [--controls P]\n"
-                "          [--scale N] [--fullscreen] [--integer-scale] [--verbose]\n",
+                "          [--scale N] [--fullscreen] [--integer-scale] [--verbose]\n"
+                "          [--host H] [--data-port N] [--clock-port N]\n",
                 argv[0]);
             return 2;
         }
@@ -253,7 +290,11 @@ int main(int argc, char** argv) {
         static_cast<std::size_t>(GbaInstance::kWidth) * GbaInstance::kHeight, 0);
     std::atomic<uint16_t> keys{0x03FF};
 
-    std::thread core(core_thread, rom_path, bios_path, &screen, &audio, &keys);
+    // Written by the core thread once its instance exists, read here only to
+    // break the link during shutdown.
+    std::atomic<GbaInstance*> linked_instance{nullptr};
+    std::thread core(core_thread, rom_path, bios_path, &screen, &audio, &keys,
+                     link, &linked_instance);
 
     auto last_report = std::chrono::steady_clock::now();
     while (!g_quit.load(std::memory_order_relaxed)) {
@@ -311,6 +352,10 @@ int main(int argc, char** argv) {
     }
 
     g_quit.store(true);
+    // Before the join, not after: a core parked in a stalled run_frame() never
+    // reaches the top of its loop to notice g_quit.
+    if (GbaInstance* g = linked_instance.load(std::memory_order_acquire))
+        g->shutdown_link();
     if (core.joinable()) core.join();
 
     SDL_DestroyTexture(tex);

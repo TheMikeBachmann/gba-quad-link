@@ -11,8 +11,12 @@
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/audio-resampler.h>
 #include <mgba-util/vfs.h>
+#include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/sio.h>
+#include <mgba/internal/gba/sio/dolphin.h>
 
 #include <fcntl.h>
+#include <sys/socket.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -58,6 +62,14 @@ void install_logger(bool verbose) {
 }
 
 void set_log_player(int player) { t_log_player = player; }
+
+// mGBA's Dolphin driver, and the one flag telling us whether it was ever
+// handed a live pair of sockets. Kept out of the header with the rest.
+struct GbaInstance::Link {
+    struct GBASIODolphin dol;
+    bool dialled = false;
+    bool attached = false;
+};
 
 // Everything between the core's mixer and the host's sound card. Kept out of
 // the header so nothing else has to see mGBA's internals.
@@ -133,14 +145,78 @@ void GbaInstance::close() {
         audio_ = nullptr;
     }
     if (core_) {
+        // Unhook the driver before the core goes: the driver holds a timing
+        // event scheduled against it.
+        if (link_ && link_->attached) {
+            struct GBA* gba = static_cast<struct GBA*>(core_->board);
+            GBASIOSetDriver(&gba->sio, nullptr);
+            link_->attached = false;
+        }
         core_->deinit(core_);   // takes the ROM and BIOS VFiles with it
         core_ = nullptr;
+    }
+    if (link_) {
+        GBASIODolphinDestroy(&link_->dol);
+        delete link_;
+        link_ = nullptr;
     }
     // Only ever set while open() is still deciding whether the core will take
     // them; past that point they belong to the core.
     if (rom_vf_) { rom_vf_->close(rom_vf_); rom_vf_ = nullptr; }
     if (bios_vf_) { bios_vf_->close(bios_vf_); bios_vf_ = nullptr; }
     video_.clear();
+}
+
+bool GbaInstance::dial(const std::string& host, uint16_t data_port,
+                       uint16_t clock_port, std::string* err) {
+    if (!core_) {
+        if (err) *err = "no core to link";
+        return false;
+    }
+    if (!link_) {
+        link_ = new Link();
+        GBASIODolphinCreate(&link_->dol);
+    }
+    if (link_->dialled) return true;
+
+    struct Address addr;
+    // Returns an errno-style int, so zero is success. Testing it as a bool
+    // gets the answer exactly backwards.
+    if (SocketResolveHost(host.c_str(), &addr) != 0) {
+        if (err) *err = "cannot resolve " + host;
+        return false;
+    }
+    // Dolphin listens and we dial out — the opposite of how a GBA link cable
+    // is usually modelled, and the reason nothing works until Dolphin is
+    // already running with its SI ports set to "GBA (TCP)".
+    if (!GBASIODolphinConnect(&link_->dol, &addr,
+                              static_cast<short>(data_port),
+                              static_cast<short>(clock_port))) {
+        if (err) *err = "no Dolphin listening on " + host;
+        return false;
+    }
+    link_->dialled = true;
+    return true;
+}
+
+void GbaInstance::attach() {
+    if (!core_ || !link_ || !link_->dialled || link_->attached) return;
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+    // Sets driver->p and then runs the driver's init, which schedules its
+    // first timing event. Both need the sockets to already be live.
+    GBASIOSetDriver(&gba->sio, &link_->dol.d);
+    link_->attached = true;
+}
+
+void GbaInstance::shutdown_link() {
+    if (!link_ || !link_->dialled) return;
+    for (Socket s : {link_->dol.data, link_->dol.clock})
+        if (!SOCKET_FAILED(s)) ::shutdown(s, SHUT_RDWR);
+}
+
+bool GbaInstance::linked() const {
+    return link_ && link_->attached &&
+           GBASIODolphinIsConnected(&link_->dol);
 }
 
 void GbaInstance::run_frame() {
