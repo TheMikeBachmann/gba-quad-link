@@ -96,7 +96,7 @@ struct AudioOut {
 
 // Runs one machine until told to stop. The instance was opened and dialled by
 // the host thread; from here on it belongs to this one.
-void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
+void machine_thread(Machine* me, AudioOut* audio) {
     gql::set_log_player(me->index);
 
     if (me->mode == gql::LinkMode::Cable)
@@ -380,10 +380,55 @@ int main(int argc, char** argv) {
     //
     // One cable, shared by whichever machines are plugged into it. Cheap when
     // nothing is.
-    gql::CableGroup cable;
+    gql::CableGroup cables[gql::kMaxCables];
 
     Machine machines[kMaxPlayers];
     for (int i = 0; i < kMaxPlayers; ++i) machines[i].index = i;
+
+    // Work out which cable each machine belongs on.
+    //
+    // You link with the people playing your game, so cartridge is the grouping
+    // — and it is a better signal than watching the serial port, because by
+    // the time two machines are visibly trying to talk to each other they have
+    // already failed to. A machine with an override goes where it is told,
+    // which is what the cases cartridge identity gets wrong need: the Mario
+    // Advance games all link to play Mario Bros., Pokemon versions trade with
+    // each other, and in single-pak multiplayer only one machine has a
+    // cartridge at all.
+    //
+    // Returns true if anything moved.
+    const auto compute_groups = [&]() {
+        int before[kMaxPlayers];
+        for (int i = 0; i < players; ++i) before[i] = machines[i].group;
+
+        std::string key_of_group[gql::kMaxCables];
+        bool used[gql::kMaxCables] = {};
+
+        // Overrides first, so an explicitly chosen cable keeps its number
+        // whatever the cartridges do.
+        for (int i = 0; i < players; ++i) {
+            const int o = machines[i].group_override;
+            if (o >= 0 && o < gql::kMaxCables) {
+                machines[i].group = o;
+                used[o] = true;
+            }
+        }
+        for (int i = 0; i < players; ++i) {
+            if (machines[i].group_override >= 0) continue;
+            const std::string& key = machines[i].rom_path;
+            int found = -1;
+            for (int g = 0; g < gql::kMaxCables; ++g)
+                if (used[g] && key_of_group[g] == key) found = g;
+            if (found < 0)
+                for (int g = 0; g < gql::kMaxCables && found < 0; ++g)
+                    if (!used[g]) { found = g; used[g] = true; key_of_group[g] = key; }
+            machines[i].group = found < 0 ? 0 : found;
+        }
+
+        for (int i = 0; i < players; ++i)
+            if (before[i] != machines[i].group) return true;
+        return false;
+    };
 
     // Claim the lowest free quadrant, so pads land on players 1..4 in the
     // order they appear and a removed pad's slot is reused.
@@ -522,6 +567,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    compute_groups();
+
     {
         int on_cable = 0;
         for (int i = 0; i < players; ++i)
@@ -545,15 +592,14 @@ int main(int argc, char** argv) {
         // asks for its quadrant rather than being told its position.
         for (int i = 0; i < players; ++i)
             if (machines[i].mode == gql::LinkMode::Cable)
-                machines[i].gba.attach_cable(&cable, i);
+                machines[i].gba.attach_cable(&cables[machines[i].group], i);
         std::printf("link cable: %d machines chained\n", on_cable);
         }
     }
 
     for (int i = 0; i < players; ++i) {
         machines[i].thread = std::thread(
-            machine_thread, &machines[i], i == audio_player ? &audio : nullptr,
-            &cable);
+            machine_thread, &machines[i], i == audio_player ? &audio : nullptr);
     }
 
     // --- window -----------------------------------------------------------
@@ -608,6 +654,7 @@ int main(int argc, char** argv) {
         std::printf("library: %d cartridges in %s\n", (int)roms.size(),
                     rom_dir.c_str());
 
+
     // Hand one machine a different cartridge, without disturbing the others.
     // The thread has to go first: the instance belongs to it, and reopening a
     // core underneath a thread that is running it is not a thing that can be
@@ -646,7 +693,7 @@ int main(int argc, char** argv) {
         // its own thread is asking for the desynchronization we just spent an
         // afternoon removing.
         if (new_mode == gql::LinkMode::Cable) {
-            m.gba.attach_cable(&cable, i);
+            m.gba.attach_cable(&cables[m.group], i);
             m.link.store(LinkState::Cable);
         } else if (new_mode == gql::LinkMode::Dolphin && !host.empty()) {
             // Dialling and attaching both happen here, while this machine has
@@ -664,7 +711,7 @@ int main(int argc, char** argv) {
                 // Back on the cable, not nowhere, so what the menu says
                 // stays true.
                 m.mode = gql::LinkMode::Cable;
-                m.gba.attach_cable(&cable, i);
+                m.gba.attach_cable(&cables[m.group], i);
                 m.link.store(LinkState::Cable);
                 status = "Player " + std::to_string(i + 1) + ": " + lerr;
             }
@@ -675,10 +722,26 @@ int main(int argc, char** argv) {
         // players would swap places mid-game.
         m.stop.store(false);
         m.thread = std::thread(machine_thread, &m,
-                               i == audio_player ? &audio : nullptr, &cable);
+                               i == audio_player ? &audio : nullptr);
         status = "Player " + std::to_string(i + 1) + ": " +
                  (new_rom.empty() ? std::string("BIOS, no cartridge")
                                   : std::filesystem::path(new_rom).stem().string());
+    };
+
+    // A cartridge change can move other machines between cables — someone
+    // picking up the game two others are playing joins their cable, and
+    // someone putting it down leaves. Only the machines that actually moved
+    // are restarted; restarting a player who is not affected would throw away
+    // whatever they were in the middle of for nothing.
+    const auto regroup = [&]() {
+        int before[kMaxPlayers];
+        for (int i = 0; i < players; ++i) before[i] = machines[i].group;
+        if (!compute_groups()) return;
+        for (int i = 0; i < players; ++i) {
+            if (before[i] == machines[i].group) continue;
+            if (machines[i].mode != gql::LinkMode::Cable) continue;
+            restart_machine(i, machines[i].rom_path, machines[i].mode);
+        }
     };
 
     const auto begin_capture = [&](int p, int b) {
@@ -884,8 +947,10 @@ int main(int argc, char** argv) {
                         rom_filter[0] = '\0';
                     }
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("clear"))
+                    if (ImGui::SmallButton("clear")) {
                         restart_machine(p, "", machines[p].mode);
+                        regroup();
+                    }
 
                     // What this machine's serial port is plugged into. A GBA
                     // has one, so these are exclusive.
@@ -908,14 +973,34 @@ int main(int argc, char** argv) {
                         if (kModes[k].mode == machines[p].mode) cur = k;
                     const char* labels[kModeCount];
                     for (int k = 0; k < kModeCount; ++k) labels[k] = kModes[k].label;
+                    if (machines[p].mode == gql::LinkMode::Cable) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(104.0f);
+                        // "auto" is by cartridge and is right nearly always.
+                        // The letters are for the games cartridge identity
+                        // gets wrong - trading between versions, the Mario
+                        // Advance link, one cartridge shared by four people.
+                        const char* kGroups[] = {"auto", "A", "B", "C", "D"};
+                        int gsel = machines[p].group_override + 1;
+                        if (ImGui::Combo("##group", &gsel, kGroups, 5)) {
+                            machines[p].group_override = gsel - 1;
+                            regroup();
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("on %c", 'A' + machines[p].group);
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(92.0f);
                     if (ImGui::Combo("##mode", &cur, labels, kModeCount)) {
                         const gql::LinkMode want = kModes[cur].mode;
                         if (want != machines[p].mode) {
                             if (want == gql::LinkMode::Dolphin && host.empty())
                                 status = "No Dolphin to join - set a host "
                                          "below, or start with --host";
-                            else
+                            else {
                                 restart_machine(p, machines[p].rom_path, want);
+                                regroup();
+                            }
                         }
                     }
 
@@ -938,9 +1023,11 @@ int main(int argc, char** argv) {
                             const bool same =
                                 machines[q].rom_path == machines[p].rom_path;
                             ImGui::BeginDisabled(same);
-                            if (ImGui::SmallButton(n))
+                            if (ImGui::SmallButton(n)) {
                                 restart_machine(q, machines[p].rom_path,
                                                 machines[q].mode);
+                                regroup();
+                            }
                             ImGui::EndDisabled();
                             if (same && ImGui::IsItemHovered(
                                     ImGuiHoveredFlags_AllowWhenDisabled))
@@ -960,6 +1047,7 @@ int main(int argc, char** argv) {
                                     machines[q].rom_path != machines[p].rom_path)
                                     restart_machine(q, machines[p].rom_path,
                                                     machines[q].mode);
+                            regroup();
                             status = "All players given " +
                                      std::filesystem::path(machines[p].rom_path)
                                          .stem().string();
@@ -1038,6 +1126,7 @@ int main(int argc, char** argv) {
                             if (ImGui::Selectable(e.display.c_str())) {
                                 restart_machine(browsing_for, e.path,
                                                 machines[browsing_for].mode);
+                                regroup();
                                 browsing_for = -1;
                             }
                             ImGui::PopID();

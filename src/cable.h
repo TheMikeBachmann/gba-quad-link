@@ -19,6 +19,11 @@
 
 namespace gql {
 
+// At most one cable per machine, which is the most that can be needed: four
+// people can form at most four groups, and that is when nobody is playing with
+// anybody.
+constexpr int kMaxCables = 4;
+
 class CableGroup {
 public:
     CableGroup();

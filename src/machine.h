@@ -84,6 +84,21 @@ struct Machine {
 
     LinkMode mode = LinkMode::Cable;
 
+    // Which cable this machine is plugged into. There is one per group of
+    // people actually playing together, not one for the room: a cable carries
+    // a single parent at position zero, and only the parent starts transfers,
+    // so two pairs sharing a cable means the pair that does not own position
+    // zero never links at all.
+    int group = 0;
+
+    // -1 to be grouped by cartridge, which is right almost always — you link
+    // with the people playing your game. Otherwise a group to be forced into,
+    // for the cases where that is wrong: the Mario Advance games all linking
+    // to play Mario Bros., Pokemon versions trading with each other, and
+    // single-pak multiplayer where one person has the cartridge and everybody
+    // else has none.
+    int group_override = -1;
+
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.
     std::atomic<bool> stop{false};
