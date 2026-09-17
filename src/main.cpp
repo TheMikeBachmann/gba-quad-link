@@ -666,7 +666,7 @@ int main(int argc, char** argv) {
         }
 
         if (setup_open) {
-            ImGui::SetNextWindowSize(ImVec2(620, 520), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_FirstUseEver);
             ImGui::Begin("Setup", nullptr, ImGuiWindowFlags_NoCollapse);
 
             if (browsing_for < 0) {
@@ -682,14 +682,59 @@ int main(int argc, char** argv) {
                     char label[32];
                     std::snprintf(label, sizeof label, "Player %d", p + 1);
                     ImGui::TextUnformatted(label);
-                    ImGui::SameLine(110.0f);
-                    ImGui::SetNextItemWidth(340.0f);
-                    if (ImGui::Button(cart.c_str(), ImVec2(340, 0))) {
+                    ImGui::SameLine(80.0f);
+                    if (ImGui::Button(cart.c_str(), ImVec2(330, 0))) {
                         browsing_for = p;
                         rom_filter[0] = '\0';
                     }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("clear")) restart_machine(p, "");
+
+                    // Handing the same cartridge to someone else is the common
+                    // case — four people sitting down to the same game — and
+                    // making each of them find it again in a list of hundreds
+                    // is the kind of thing that gets a program put down.
+                    if (!machines[p].rom_path.empty() && players > 1) {
+                        ImGui::SameLine();
+                        ImGui::TextUnformatted("to");
+                        for (int q = 0; q < players; ++q) {
+                            if (q == p) continue;
+                            ImGui::SameLine();
+                            ImGui::PushID(q);
+                            char n[8];
+                            std::snprintf(n, sizeof n, "%d", q + 1);
+                            // Already holding it is not a reason to restart
+                            // them; that would throw away whatever they were
+                            // in the middle of.
+                            const bool same =
+                                machines[q].rom_path == machines[p].rom_path;
+                            ImGui::BeginDisabled(same);
+                            if (ImGui::SmallButton(n))
+                                restart_machine(q, machines[p].rom_path);
+                            ImGui::EndDisabled();
+                            if (same && ImGui::IsItemHovered(
+                                    ImGuiHoveredFlags_AllowWhenDisabled))
+                                ImGui::SetTooltip("Player %d already has it",
+                                                  q + 1);
+                            ImGui::PopID();
+                        }
+                        ImGui::SameLine();
+                        bool any_other = false;
+                        for (int q = 0; q < players; ++q)
+                            if (q != p && machines[q].rom_path != machines[p].rom_path)
+                                any_other = true;
+                        ImGui::BeginDisabled(!any_other);
+                        if (ImGui::SmallButton("all")) {
+                            for (int q = 0; q < players; ++q)
+                                if (q != p &&
+                                    machines[q].rom_path != machines[p].rom_path)
+                                    restart_machine(q, machines[p].rom_path);
+                            status = "All players given " +
+                                     std::filesystem::path(machines[p].rom_path)
+                                         .stem().string();
+                        }
+                        ImGui::EndDisabled();
+                    }
                     ImGui::PopID();
                 }
                 ImGui::Separator();
