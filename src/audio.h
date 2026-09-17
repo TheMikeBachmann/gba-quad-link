@@ -77,6 +77,10 @@ private:
     Source src_[kMixSources];
     std::vector<int16_t> mix_;
     std::vector<int16_t> scratch_;
+    // Host thread only: which sources contributed to the last mix. A source
+    // with nothing while others are well supplied has stopped, and is left out
+    // rather than allowed to hold up the rest.
+    bool live_[kMixSources] = {};
     std::atomic<unsigned long> underruns_{0};
     std::atomic<unsigned long> drops_{0};
 };

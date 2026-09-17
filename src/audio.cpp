@@ -137,23 +137,51 @@ void AudioMixer::pump() {
         underruns_.fetch_add(1, std::memory_order_relaxed);
         SDL_PauseAudioDevice(dev_, 1);
     }
-    if (queued > kCeilingBytes) return;
+    // Whether there is room for more. Note that this does not stop the rings
+    // being drained below: leaving them alone while the queue is long means
+    // they fill and overflow, and what they then hold is old. Better to take
+    // the audio and throw it away knowingly than to leave stale audio sitting
+    // in a buffer waiting to be played late.
+    const bool room = queued <= kCeilingBytes;
 
-    // However much the most-supplied machine has. A machine with less
-    // contributes what it has and silence after, which is what one that has
-    // stopped should sound like — rather than holding up everybody else.
-    std::size_t want = 0;
-    for (int i = 0; i < kMixSources; ++i)
-        if (src_[i].on.load(std::memory_order_relaxed))
-            want = std::max(want, available(src_[i]));
-    want = std::min(want, mix_.size() / 2);
-    if (want == 0) return;
+    // However much the least-supplied machine has — not the most.
+    //
+    // Taking the largest and padding the others to match sounds exactly as bad
+    // as it should: the output then runs at the rate of whichever machine is
+    // furthest ahead, every slower one is zero-filled to keep up, and those
+    // fills are audible as chopping. The surplus is then thrown away at the
+    // queue ceiling, so the figure to watch is the drop count: four machines
+    // mixed that way dropped half a million blocks in forty seconds where one
+    // machine dropped none.
+    //
+    // A machine that has genuinely stopped is excluded instead of allowed to
+    // hold up the rest, which is the case padding was reaching for.
+    std::size_t have[kMixSources];
+    std::size_t most = 0;
+    for (int i = 0; i < kMixSources; ++i) {
+        have[i] = src_[i].on.load(std::memory_order_relaxed)
+                      ? available(src_[i]) : 0;
+        most = std::max(most, have[i]);
+    }
+    // Nothing at all while somebody else has a quarter second banked is a
+    // machine that has stopped, not one that is merely a little behind.
+    const std::size_t kStalled = 12000;
+    std::size_t want = mix_.size() / 2;
+    bool any_live = false;
+    for (int i = 0; i < kMixSources; ++i) {
+        if (!src_[i].on.load(std::memory_order_relaxed)) continue;
+        live_[i] = !(have[i] == 0 && most > kStalled);
+        if (!live_[i]) continue;
+        want = std::min(want, have[i]);
+        any_live = true;
+    }
+    if (!any_live || want == 0) return;
 
     std::fill(mix_.begin(), mix_.begin() + want * 2, 0);
     bool any = false;
     for (int i = 0; i < kMixSources; ++i) {
         Source& s = src_[i];
-        if (!s.on.load(std::memory_order_relaxed)) continue;
+        if (!s.on.load(std::memory_order_relaxed) || !live_[i]) continue;
         const std::size_t got = take(s, scratch_.data(), want);
         if (got == 0) continue;
         any = true;
@@ -168,6 +196,13 @@ void AudioMixer::pump() {
         }
     }
     if (!any) return;
+    if (!room) {
+        // Drained and discarded. The guests are ahead of the sound card, which
+        // over a long session they will drift into being; dropping the surplus
+        // here keeps the lag from growing without bound.
+        drops_.fetch_add(want, std::memory_order_relaxed);
+        return;
+    }
 
     SDL_QueueAudio(dev_, mix_.data(),
                    static_cast<Uint32>(want * 2 * sizeof(int16_t)));
