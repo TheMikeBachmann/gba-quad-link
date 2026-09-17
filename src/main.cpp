@@ -153,8 +153,14 @@ void machine_thread(Machine* me, AudioOut* audio) {
             if (!me->gba.link_alive()) {
                 linked = false;
                 me->link.store(LinkState::Lost, std::memory_order_relaxed);
-                std::printf("p%d link: Dolphin went away\n", me->index + 1);
-                std::fflush(stdout);
+                // Quietly if we are the ones closing the sockets. Shutdown
+                // breaks every link on purpose, and four machines each
+                // announcing it reads like a fault at exactly the moment
+                // nothing is wrong.
+                if (!g_quit.load(std::memory_order_relaxed)) {
+                    std::printf("p%d link: Dolphin went away\n", me->index + 1);
+                    std::fflush(stdout);
+                }
             } else {
                 const auto t = std::chrono::steady_clock::now();
                 if (me->gba.joybus_active()) joybus_mark = t;
