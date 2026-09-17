@@ -616,6 +616,23 @@ int main(int argc, char** argv) {
         if (new_mode == gql::LinkMode::Cable) {
             m.gba.attach_cable(&cable, i);
             m.link.store(LinkState::Cable);
+        } else if (new_mode == gql::LinkMode::Dolphin && !host.empty()) {
+            // Dialling and attaching both happen here, while this machine has
+            // no thread of its own — so the attach is ordered before anything
+            // starts running the core, which is what it needs.
+            std::string lerr;
+            m.link.store(LinkState::Dialling);
+            if (m.gba.dial(host, data_port, clock_port, &lerr)) {
+                m.gba.attach();
+                m.dialled = true;
+                m.link.store(LinkState::Waiting);
+                status = "Player " + std::to_string(i + 1) +
+                         " joined Dolphin";
+            } else {
+                m.link.store(LinkState::Off);
+                m.mode = gql::LinkMode::None;
+                status = "Player " + std::to_string(i + 1) + ": " + lerr;
+            }
         } else {
             m.link.store(LinkState::Off);
         }
@@ -831,17 +848,11 @@ int main(int argc, char** argv) {
                     if (ImGui::Combo("##mode", &cur, kModes, 3)) {
                         const auto want = static_cast<gql::LinkMode>(cur);
                         if (want != machines[p].mode) {
-                            if (want == gql::LinkMode::Dolphin) {
-                                // Dolphin hands out SI slots in the order
-                                // connections arrive, so one machine joining
-                                // on its own would take whichever slot came
-                                // next and move everyone else's player number.
-                                status = "Dolphin has to be joined by all "
-                                         "players at once, in order - restart "
-                                         "with --host";
-                            } else {
+                            if (want == gql::LinkMode::Dolphin && host.empty())
+                                status = "No Dolphin to join - set a host "
+                                         "below, or start with --host";
+                            else
                                 restart_machine(p, machines[p].rom_path, want);
-                            }
                         }
                     }
 
@@ -904,6 +915,29 @@ int main(int argc, char** argv) {
                 } else {
                     ImGui::Text("%d cartridges in %s", (int)roms.size(),
                                 rom_dir.c_str());
+                }
+                ImGui::Separator();
+                {
+                    static char host_buf[64] = {0};
+                    static bool host_init = false;
+                    if (!host_init) {
+                        std::snprintf(host_buf, sizeof host_buf, "%s",
+                                      host.c_str());
+                        host_init = true;
+                    }
+                    ImGui::SetNextItemWidth(220.0f);
+                    if (ImGui::InputText("Dolphin host", host_buf,
+                                         sizeof host_buf))
+                        host = host_buf;
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(?)");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "The machine Dolphin is running on. Players take "
+                            "the GameCube's controller ports in the order they "
+                            "join, so switch them on in the order you want "
+                            "them numbered - or just read your own quadrant "
+                            "and ignore what the game calls you.");
                 }
                 ImGui::Separator();
                 if (ImGui::Checkbox("Mirror one player's controls to all four "
