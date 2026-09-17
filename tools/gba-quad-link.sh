@@ -24,7 +24,11 @@ if [ ! -x "$bin" ]; then
     exit 1
 fi
 
-# Fullscreen by default: Game Mode has no window manager to resize against and
-# no keyboard to press anything with. Arguments are appended, so a shortcut can
-# still override.
-exec "$bin" --fullscreen "$@"
+# Fullscreen with four machines by default: Game Mode has no window manager to
+# resize against and no keyboard to press anything with. Arguments are
+# appended, so a shortcut can still override — in particular --host, which is
+# the machine Dolphin is running on. Set GQL_HOST and it is passed for you.
+if [ -n "${GQL_HOST:-}" ]; then
+    exec "$bin" --players 4 --fullscreen --host "$GQL_HOST" "$@"
+fi
+exec "$bin" --players 4 --fullscreen "$@"

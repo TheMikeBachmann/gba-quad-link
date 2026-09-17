@@ -18,3 +18,7 @@ imgui.ini
 # Packaged output and the tools fetched to build it.
 *.AppImage
 runtime-x86_64
+
+# Packaging scratch. squashfs-root is where --appimage-extract unpacks.
+build/AppDir/
+squashfs-root/

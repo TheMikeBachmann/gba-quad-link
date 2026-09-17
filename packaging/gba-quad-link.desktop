@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GBA Quad Link
+Comment=Four Game Boy Advance screens linked to Dolphin over the network
+Exec=gba-quad-link
+Icon=gba-quad-link
+Categories=Game;
+Terminal=false

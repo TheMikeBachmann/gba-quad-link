@@ -18,7 +18,7 @@
 namespace gql {
 
 // Directory for the files the app writes — bound controls, window layout.
-// $XDG_CONFIG_HOME/gql-4p, or ~/.config/gql-4p. Created if it does not
+// $XDG_CONFIG_HOME/gba-quad-link, or ~/.config/gba-quad-link. Created if it does not
 // exist. Empty if neither variable is usable, in which case the caller should
 // fall back to the current directory and accept that it may be read-only.
 std::string config_dir();
@@ -31,9 +31,9 @@ std::string config_dir();
 // can reach, nearest-to-the-user first:
 //
 //   $GQL_DATA_DIR       an explicit override
-//   $XDG_DATA_HOME/gql-4p  or ~/.local/share/gql-4p
+//   $XDG_DATA_HOME/gba-quad-link  or ~/.local/share/gba-quad-link
 //   alongside the AppImage  the directory holding $APPIMAGE
-//   inside the AppImage     $APPDIR/usr/share/gql-4p
+//   inside the AppImage     $APPDIR/usr/share/gba-quad-link
 //
 // Returns `preferred` unchanged when nothing is found, so the caller reports
 // the path the user asked for rather than the last one searched.

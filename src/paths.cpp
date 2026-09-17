@@ -27,9 +27,9 @@ std::vector<fs::path> asset_dirs() {
     std::vector<fs::path> dirs;
     if (const char* d = env("GQL_DATA_DIR")) dirs.emplace_back(d);
     if (const char* d = env("XDG_DATA_HOME"))
-        dirs.emplace_back(fs::path(d) / "gql-4p");
+        dirs.emplace_back(fs::path(d) / "gba-quad-link");
     else if (const char* home = env("HOME"))
-        dirs.emplace_back(fs::path(home) / ".local" / "share" / "gql-4p");
+        dirs.emplace_back(fs::path(home) / ".local" / "share" / "gba-quad-link");
     // $APPIMAGE is the path of the .AppImage file itself, set by its runtime.
     // Looking beside it is what makes "keep the ROM next to the image" work.
     if (const char* img = env("APPIMAGE")) {
@@ -38,7 +38,7 @@ std::vector<fs::path> asset_dirs() {
     }
     // $APPDIR is the mounted image. Assets bundled at package time land here.
     if (const char* app = env("APPDIR"))
-        dirs.emplace_back(fs::path(app) / "usr" / "share" / "gql-4p");
+        dirs.emplace_back(fs::path(app) / "usr" / "share" / "gba-quad-link");
     return dirs;
 }
 
@@ -46,9 +46,9 @@ std::vector<fs::path> asset_dirs() {
 
 std::string config_dir() {
     fs::path dir;
-    if (const char* d = env("XDG_CONFIG_HOME")) dir = fs::path(d) / "gql-4p";
+    if (const char* d = env("XDG_CONFIG_HOME")) dir = fs::path(d) / "gba-quad-link";
     else if (const char* home = env("HOME"))
-        dir = fs::path(home) / ".config" / "gql-4p";
+        dir = fs::path(home) / ".config" / "gba-quad-link";
     else return {};
 
     std::error_code ec;

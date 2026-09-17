@@ -1,0 +1,25 @@
+#!/bin/sh
+# Entry point for the packaged build.
+#
+# Two things have to be right before the binary starts. The bundled libraries
+# have to be found, since nothing here was patched to look for them. And the
+# defaults have to suit how this is actually launched — from a Steam shortcut
+# or a desktop icon, on a television, with no keyboard nearby — so four
+# machines fullscreen is what you get unless you say otherwise.
+#
+# Everything the image writes goes to $XDG_CONFIG_HOME/gba-quad-link, decided
+# by the binary rather than by this script, because the image is read-only.
+#
+# The GBA BIOS is not in here and never will be; see the note in
+# tools/make-appimage.sh. Put a dump beside the .AppImage or in
+# ~/.local/share/gba-quad-link/ and it will be found.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Any argument at all means the caller has its own opinion; otherwise use ours.
+if [ "$#" -eq 0 ]; then
+    exec "$HERE/usr/bin/gba-quad-link" --players 4 --fullscreen
+fi
+exec "$HERE/usr/bin/gba-quad-link" "$@"
