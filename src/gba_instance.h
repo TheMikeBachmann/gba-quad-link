@@ -55,8 +55,13 @@ public:
     // Adventures expects to find it. That path needs a real BIOS: mGBA's HLE
     // BIOS covers SWI calls only and has none of the boot ROM's JOY-bus code.
     // `bios` may be empty when a ROM boots on its own.
+    // `save` is where the cartridge's battery-backed memory lives. It is
+    // created if missing and written back as the guest writes it, so it must
+    // be somewhere the process can write; empty means run without one, which
+    // is right for a BIOS boot with no cartridge and wrong for anything else.
     bool open(const std::string& rom, const std::string& bios,
-              unsigned sample_rate, std::string* err);
+              const std::string& save, unsigned sample_rate,
+              std::string* err);
     void close();
 
     // Runs until the next frame is complete. Once the Dolphin link is attached
@@ -162,6 +167,7 @@ private:
     mCore* core_ = nullptr;
     VFile* rom_vf_ = nullptr;
     VFile* bios_vf_ = nullptr;
+    VFile* save_vf_ = nullptr;
     std::vector<uint32_t> video_;
 
     // Resampling from the core's rate to the host's. Held by pointer so this

@@ -195,7 +195,7 @@ void machine_thread(Machine* me, AudioOut* audio) {
 
 int main(int argc, char** argv) {
     int players = kMaxPlayers;
-    std::string rom_path;           // empty: boot the BIOS with no cartridge
+    std::string rom_path;           // default for every machine
     std::string bios_path = "bios/gba_bios.bin";
     std::string cfg_path;
     std::string host;               // empty: run unlinked
@@ -204,11 +204,28 @@ int main(int argc, char** argv) {
     bool fullscreen = false, integer_scale = false, verbose = false;
     int audio_player = 0;
 
+    // --player N opens a section: flags after it apply to that machine alone,
+    // until the next --player. Before any section they set the default for
+    // every machine. The setup screen is the real interface; this is for
+    // getting at it from a script.
+    std::string per_rom[kMaxPlayers];
+    int section = -1;
+
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--players") players = std::atoi(next());
-        else if (a == "--rom") rom_path = next();
+        else if (a == "--player") {
+            section = std::atoi(next()) - 1;
+            if (section < 0 || section >= kMaxPlayers) {
+                std::fprintf(stderr, "--player takes 1-%d\n", kMaxPlayers);
+                return 2;
+            }
+        }
+        else if (a == "--rom") {
+            if (section >= 0) per_rom[section] = next();
+            else rom_path = next();
+        }
         else if (a == "--bios") bios_path = next();
         else if (a == "--controls") cfg_path = next();
         else if (a == "--host") host = next();
@@ -224,6 +241,7 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
+                "          [--player N [--rom P]]...\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
                 "          [--scale N] [--fullscreen] [--integer-scale]\n"
                 "          [--audio-player 1-4] [--verbose]\n"
@@ -358,8 +376,14 @@ int main(int argc, char** argv) {
     // has to happen in player order, and that is far easier to guarantee from
     // one thread than to coordinate between four.
     for (int i = 0; i < players; ++i) {
+        machines[i].rom_path =
+            per_rom[i].empty() ? rom_path : gql::find_asset(per_rom[i]);
+        machines[i].save_path =
+            gql::save_path(machines[i].rom_path, i);
         std::string err;
-        if (!machines[i].gba.open(rom_path, bios_path, kHostSampleRate, &err)) {
+        if (!machines[i].gba.open(machines[i].rom_path, bios_path,
+                                  machines[i].save_path, kHostSampleRate,
+                                  &err)) {
             std::fprintf(stderr, "player %d: %s\n", i + 1, err.c_str());
             return 1;
         }
@@ -368,8 +392,13 @@ int main(int argc, char** argv) {
             0);
         machines[i].booted.store(true);
     }
-    std::printf("%d machine%s booted (%s)\n", players, players == 1 ? "" : "s",
-                rom_path.empty() ? "BIOS, no cartridge" : rom_path.c_str());
+    for (int i = 0; i < players; ++i) {
+        std::printf("p%d: %s%s\n", i + 1,
+                    machines[i].rom_path.empty()
+                        ? "BIOS, no cartridge"
+                        : machines[i].rom_path.c_str(),
+                    machines[i].save_path.empty() ? "" : "  (save kept)");
+    }
 
     if (!host.empty()) {
         // In player order, one at a time. Dolphin assigns the connections it

@@ -41,6 +41,12 @@ const char* link_state_name(LinkState s);
 
 struct Machine {
     int index = 0;
+
+    // Per machine, because four people may be playing four different games.
+    // Empty rom_path means boot the BIOS with no cartridge, which is what a
+    // guest waiting to be handed a program over the link does.
+    std::string rom_path;
+    std::string save_path;
     GbaInstance gba;
     std::thread thread;
 

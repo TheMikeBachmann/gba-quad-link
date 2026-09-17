@@ -57,6 +57,36 @@ std::string config_dir() {
     return dir.string();
 }
 
+std::string data_dir() {
+    fs::path dir;
+    if (const char* d = env("XDG_DATA_HOME"))
+        dir = fs::path(d) / "gba-quad-link";
+    else if (const char* home = env("HOME"))
+        dir = fs::path(home) / ".local" / "share" / "gba-quad-link";
+    else return {};
+
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) return {};
+    return dir.string();
+}
+
+std::string save_path(const std::string& rom_path, int player) {
+    if (rom_path.empty()) return {};    // no cartridge, nothing to save
+    const std::string base = data_dir();
+    if (base.empty()) return {};
+
+    std::error_code ec;
+    const fs::path dir = fs::path(base) / "saves";
+    fs::create_directories(dir, ec);
+    if (ec) return {};
+
+    fs::path name = fs::path(rom_path).stem();
+    if (name.empty()) name = "cartridge";
+    name += ".p" + std::to_string(player + 1) + ".sav";
+    return (dir / name).string();
+}
+
 std::string find_asset(const std::string& preferred) {
     std::error_code ec;
     if (!preferred.empty() && fs::exists(preferred, ec)) return preferred;

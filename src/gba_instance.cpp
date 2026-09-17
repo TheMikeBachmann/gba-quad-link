@@ -51,6 +51,45 @@ void log_to_stderr(struct mLogger*, int category, enum mLogLevel level,
 
 struct mLogger g_logger = {log_to_stderr, nullptr};
 
+// Open a ROM, reaching inside a .7z or .zip if that is what it is.
+//
+// Real ROM libraries are archives — every one of the nine hundred on the
+// machine this was written for is a .7z — so a program that only opens bare
+// .gba files is a program with nothing to open. mGBA vendors the LZMA SDK, so
+// this costs a dependency on nothing.
+//
+// The ROM is copied out rather than used in place: a file inside an archive
+// only lives as long as the archive is open, and the core keeps its ROM for
+// the whole session.
+VFile* open_rom(const std::string& path, struct mCore* core) {
+    VDir* archive = VDirOpenArchive(path.c_str());
+    if (!archive) return VFileOpen(path.c_str(), O_RDONLY);   // a plain file
+
+    VFile* found = nullptr;
+    archive->rewind(archive);
+    while (struct VDirEntry* de = archive->listNext(archive)) {
+        if (de->type(de) != VFS_FILE) continue;
+        VFile* vf = archive->openFile(archive, de->name(de), O_RDONLY);
+        if (!vf) continue;
+        // Ask the core rather than trusting the extension: archives from a ROM
+        // set carry readmes and patches alongside the cartridge.
+        if (core->isROM(vf)) {
+            const ssize_t n = vf->size(vf);
+            if (n > 0) {
+                std::vector<uint8_t> buf(static_cast<std::size_t>(n));
+                vf->seek(vf, 0, SEEK_SET);   // isROM left it wherever it liked
+                if (vf->read(vf, buf.data(), static_cast<std::size_t>(n)) == n)
+                    found = VFileMemChunk(buf.data(),
+                                          static_cast<std::size_t>(n));
+            }
+        }
+        vf->close(vf);
+        if (found) break;
+    }
+    archive->close(archive);
+    return found;
+}
+
 }  // namespace
 
 void install_logger(bool verbose) {
@@ -87,7 +126,8 @@ struct GbaInstance::Audio {
 GbaInstance::~GbaInstance() { close(); }
 
 bool GbaInstance::open(const std::string& rom, const std::string& bios,
-                       unsigned sample_rate, std::string* err) {
+                       const std::string& save, unsigned sample_rate,
+                       std::string* err) {
     close();
 
     const auto fail = [&](const char* what) {
@@ -120,12 +160,31 @@ bool GbaInstance::open(const std::string& rom, const std::string& bios,
     // the BIOS with an empty cartridge slot, which is where a GBA waits for a
     // multiboot download.
     if (!rom.empty()) {
-        rom_vf_ = VFileOpen(rom.c_str(), O_RDONLY);
-        if (!rom_vf_) return fail("cannot open the ROM");
+        rom_vf_ = open_rom(rom, core_);
+        if (!rom_vf_)
+            return fail("cannot open the ROM, or the archive holds no ROM");
         if (!core_->loadROM(core_, rom_vf_)) return fail("ROM rejected");
         rom_vf_ = nullptr;    // likewise
     } else if (bios.empty()) {
         return fail("no ROM and no BIOS — nothing to boot");
+    }
+
+    // After the ROM, because mGBA works out the save's type and size from the
+    // cartridge header and has nothing to go on before that.
+    if (!rom.empty() && !save.empty()) {
+        save_vf_ = VFileOpen(save.c_str(), O_CREAT | O_RDWR);
+        if (!save_vf_) {
+            // Not fatal. A game that cannot write its save is still a game;
+            // one that refuses to start is not.
+            std::fprintf(stderr, "save: cannot open %s — progress will not be "
+                                 "kept\n", save.c_str());
+        } else if (!core_->loadSave(core_, save_vf_)) {
+            std::fprintf(stderr, "save: %s rejected — progress will not be "
+                                 "kept\n", save.c_str());
+            save_vf_ = nullptr;   // the core took it and did not want it
+        } else {
+            save_vf_ = nullptr;   // the core owns it now and flushes on deinit
+        }
     }
 
     host_rate_ = sample_rate;
@@ -166,6 +225,7 @@ void GbaInstance::close() {
     // them; past that point they belong to the core.
     if (rom_vf_) { rom_vf_->close(rom_vf_); rom_vf_ = nullptr; }
     if (bios_vf_) { bios_vf_->close(bios_vf_); bios_vf_ = nullptr; }
+    if (save_vf_) { save_vf_->close(save_vf_); save_vf_ = nullptr; }
     video_.clear();
 }
 

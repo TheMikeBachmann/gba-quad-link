@@ -23,6 +23,21 @@ namespace gql {
 // fall back to the current directory and accept that it may be read-only.
 std::string config_dir();
 
+// Directory for the larger things the app writes — battery saves.
+// $XDG_DATA_HOME/gba-quad-link, or ~/.local/share/gba-quad-link. Created if it
+// does not exist, empty if there is nowhere usable.
+std::string data_dir();
+
+// Where a player's battery save lives, for a given cartridge.
+//
+// Per player, not per cartridge, and that is deliberate. Four people playing
+// the same four-player cable game each have their own copy of it with their
+// own save on it; pointing four cores at one file would have them overwrite
+// each other's progress in a way that looks like corruption rather than like a
+// mistake. Empty if there is nowhere to write, in which case the game runs
+// with a save that is not kept.
+std::string save_path(const std::string& rom_path, int player);
+
 // Resolve a read-only asset: the GBA BIOS image, a ROM.
 //
 // `preferred` is taken as given if it names something that exists, so an

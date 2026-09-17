@@ -32,6 +32,13 @@ endforeach()
 set(BINARY_NAME mgba CACHE INTERNAL "")
 set(M_CORE_GBA ON  CACHE BOOL "" FORCE)
 set(M_CORE_GB  OFF CACHE BOOL "" FORCE)   # no Game Boy core; nothing here uses it
+
+# 7-Zip support, which LIBMGBA_ONLY would otherwise switch off along with the
+# rest of the optional dependencies. It does not belong with them: mGBA vendors
+# the LZMA SDK, so this costs nothing but compile time and adds no system
+# dependency. Worth having because real ROM libraries are archives — a browser
+# that cannot see a .7z is a browser that shows an empty folder.
+set(USE_LZMA ON CACHE BOOL "" FORCE)
 add_subdirectory("${MGBA_ROOT}" mgba EXCLUDE_FROM_ALL)
 
 # mGBA's own compile settings reach its sources through directory- and
