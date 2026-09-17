@@ -119,6 +119,14 @@ void machine_thread(Machine* me, AudioOut* audio) {
     auto fps_mark = std::chrono::steady_clock::now();
     uint64_t fps_frame = 0;
 
+    // A guest waiting to be given a program cycles through serial modes
+    // looking for a host, so whether a once-a-frame sample catches it in JOY
+    // bus is chance. Reporting that raw makes the status column flicker
+    // several times a second between "waiting" and "linked", which is
+    // accurate and useless. Latch the last time it was seen there instead.
+    auto joybus_mark = std::chrono::steady_clock::time_point{};
+    constexpr auto kJoybusHold = std::chrono::milliseconds(750);
+
     while (!g_quit.load(std::memory_order_relaxed)) {
         me->gba.set_keys(g_input_held.load(std::memory_order_relaxed)
                              ? 0x03FF
@@ -148,8 +156,11 @@ void machine_thread(Machine* me, AudioOut* audio) {
                 std::printf("p%d link: Dolphin went away\n", me->index + 1);
                 std::fflush(stdout);
             } else {
-                me->link.store(me->gba.joybus_active() ? LinkState::Linked
-                                                       : LinkState::Waiting,
+                const auto t = std::chrono::steady_clock::now();
+                if (me->gba.joybus_active()) joybus_mark = t;
+                me->link.store(t - joybus_mark < kJoybusHold
+                                   ? LinkState::Linked
+                                   : LinkState::Waiting,
                                std::memory_order_relaxed);
             }
         }
