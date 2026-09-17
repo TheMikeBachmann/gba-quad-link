@@ -41,6 +41,7 @@
 #include "machine.h"
 #include "paths.h"
 #include "romlist.h"
+#include "settings.h"
 
 namespace {
 
@@ -341,6 +342,18 @@ int main(int argc, char** argv) {
         cfg_path = settings_dir.empty() ? std::string("controls.cfg")
                                         : settings_dir + "/controls.cfg";
     }
+    // Remembered from last time, then overridden by anything on the command
+    // line. Asking someone to type the path to their cartridges on a
+    // television, with a controller, every time they sit down, is not a
+    // reasonable thing to do to a person.
+    const std::string settings_path =
+        settings_dir.empty() ? std::string("settings.cfg")
+                             : settings_dir + "/settings.cfg";
+    gql::Settings settings;
+    gql::load_settings(settings_path, &settings);
+    if (rom_dir_arg.empty()) rom_dir_arg = settings.rom_dir;
+    if (host.empty()) host = settings.host;
+
     const std::string imgui_ini = settings_dir.empty()
                                       ? std::string("imgui.ini")
                                       : settings_dir + "/imgui.ini";
@@ -723,9 +736,21 @@ int main(int argc, char** argv) {
     std::vector<gql::RomEntry> roms = gql::scan_roms(rom_dir);
     char rom_filter[64] = {0};
     int browsing_for = -1;   // which player is picking, -1 for nobody
+    std::string browsing_dir;             // non-empty while choosing a folder
+    std::vector<gql::DirEntry> dir_entries;
     if (!roms.empty())
         std::printf("library: %d cartridges in %s\n", (int)roms.size(),
                     rom_dir.c_str());
+
+    // Written back straight away rather than on exit: a session that ends by
+    // having its window closed, or by crashing, should still have remembered
+    // where the cartridges were.
+    const auto remember = [&]() {
+        settings.rom_dir = rom_dir;
+        settings.host = host;
+        gql::save_settings(settings_path, settings);
+    };
+    if (!rom_dir.empty() && rom_dir != settings.rom_dir) remember();
 
 
     // Hand one machine a different cartridge, without disturbing the others.
@@ -1009,7 +1034,7 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_FirstUseEver);
             ImGui::Begin("Setup", nullptr, ImGuiWindowFlags_NoCollapse);
 
-            if (browsing_for < 0) {
+            if (browsing_for < 0 && browsing_dir.empty()) {
                 ImGui::TextUnformatted("What each player is running. "
                                        "F2 or Select+Start closes this.");
                 ImGui::Separator();
@@ -1159,8 +1184,10 @@ int main(int argc, char** argv) {
                     }
                     ImGui::SetNextItemWidth(220.0f);
                     if (ImGui::InputText("Dolphin host", host_buf,
-                                         sizeof host_buf))
+                                         sizeof host_buf)) {
                         host = host_buf;
+                        remember();
+                    }
                     ImGui::SameLine();
                     ImGui::TextDisabled("(?)");
                     if (ImGui::IsItemHovered())
@@ -1179,10 +1206,90 @@ int main(int argc, char** argv) {
                     "Turn it off before anyone has to choose something of "
                     "their own - a character, a kart, a track vote.");
                 ImGui::Separator();
+                if (ImGui::Button("Change folder...")) {
+                    browsing_dir = rom_dir.empty() ? gql::default_rom_dir()
+                                                   : rom_dir;
+                    if (browsing_dir.empty()) browsing_dir = "/";
+                    dir_entries = gql::list_subdirs(browsing_dir);
+                }
+                ImGui::SameLine();
                 if (ImGui::Button("Rescan")) {
                     roms = gql::scan_roms(rom_dir);
-                    status = "Found " + std::to_string(roms.size()) + " cartridges";
+                    remember();
+                    status = "Found " + std::to_string(roms.size()) +
+                             " cartridges";
                 }
+            } else if (!browsing_dir.empty()) {
+                // Walking the filesystem with a controller. Folders only —
+                // picking a cartridge is the other browser's job, and this one
+                // only has to arrive at the folder they live in.
+                ImGui::TextUnformatted("Where are your cartridges?");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("cancel")) {
+                    browsing_dir.clear();
+                    dir_entries.clear();
+                }
+                ImGui::Separator();
+
+                for (const gql::DirEntry& r : gql::quick_roots()) {
+                    ImGui::PushID(r.path.c_str());
+                    if (ImGui::SmallButton(r.name.c_str())) {
+                        browsing_dir = r.path;
+                        dir_entries = gql::list_subdirs(browsing_dir);
+                    }
+                    ImGui::PopID();
+                    ImGui::SameLine();
+                }
+                ImGui::NewLine();
+
+                ImGui::TextWrapped("%s", browsing_dir.c_str());
+                const int here = gql::count_roms(browsing_dir);
+                // Said before they commit, so the right folder is recognisable
+                // without having to choose it and find out.
+                if (here > 0)
+                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
+                                       "%d cartridges in this folder", here);
+                else
+                    ImGui::TextDisabled("no cartridges directly in this folder");
+
+                ImGui::BeginDisabled(here == 0);
+                if (ImGui::Button("Use this folder")) {
+                    rom_dir = browsing_dir;
+                    roms = gql::scan_roms(rom_dir);
+                    remember();
+                    status = "Found " + std::to_string(roms.size()) +
+                             " cartridges";
+                    browsing_dir.clear();
+                    dir_entries.clear();
+                }
+                ImGui::EndDisabled();
+                ImGui::Separator();
+
+                if (ImGui::BeginChild("dirs", ImVec2(0, 0), true)) {
+                    const std::string up = gql::parent_dir(browsing_dir);
+                    if (!up.empty() && ImGui::Selectable(".."))  {
+                        browsing_dir = up;
+                        dir_entries = gql::list_subdirs(browsing_dir);
+                    }
+                    for (int n = 0; n < (int)dir_entries.size(); ++n) {
+                        ImGui::PushID(n);
+                        const int inside = gql::count_roms(dir_entries[n].path);
+                        char label[320];
+                        std::snprintf(label, sizeof label, "%s%s",
+                                      dir_entries[n].name.c_str(),
+                                      inside ? "   >" : "");
+                        if (ImGui::Selectable(label)) {
+                            browsing_dir = dir_entries[n].path;
+                            dir_entries = gql::list_subdirs(browsing_dir);
+                        }
+                        if (inside) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("(%d)", inside);
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::EndChild();
             } else {
                 ImGui::Text("Cartridge for player %d", browsing_for + 1);
                 ImGui::SameLine();

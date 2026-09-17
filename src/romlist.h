@@ -34,6 +34,28 @@ std::vector<RomEntry> scan_roms(const std::string& dir);
 std::vector<int> filter_roms(const std::vector<RomEntry>& roms,
                              const std::string& needle);
 
+// One directory, for walking a filesystem with a controller. Typing a path on
+// a television is not a thing anyone should be asked to do.
+struct DirEntry {
+    std::string name;   // what to show
+    std::string path;   // where it goes
+};
+
+// Subdirectories of `dir`, sorted, with unreadable ones left out. The parent
+// is not included; ask for it separately.
+std::vector<DirEntry> list_subdirs(const std::string& dir);
+
+// The containing directory, or an empty string at the root.
+std::string parent_dir(const std::string& dir);
+
+// How many cartridges are directly in `dir`, for telling someone they have
+// found the right folder before they commit to it.
+int count_roms(const std::string& dir);
+
+// Sensible places to start from: home, anything mounted as removable media,
+// and the root. A cartridge library is nearly always on a memory card.
+std::vector<DirEntry> quick_roots();
+
 // Where to look when the user has not said. The first of these that exists and
 // holds something: $GQL_ROM_DIR, a "roms" directory beside the executable or
 // the AppImage, $XDG_DATA_HOME/gba-quad-link/roms, ~/roms.

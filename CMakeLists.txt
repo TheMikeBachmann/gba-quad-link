@@ -95,6 +95,7 @@ add_executable(gba-quad-link
     src/layout.cpp
     src/machine.cpp
     src/romlist.cpp
+    src/settings.cpp
     src/cable.cpp
     src/controls.cpp
     src/paths.cpp)
