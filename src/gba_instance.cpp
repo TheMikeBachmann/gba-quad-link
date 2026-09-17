@@ -17,6 +17,7 @@
 #include <mgba/internal/gba/sio/dolphin.h>
 #include <mgba/internal/gba/sio/lockstep.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -161,6 +162,7 @@ struct GbaInstance::Cable {
     // only for the waiting itself.
     std::atomic<bool> asleep{false};
     unsigned long sleeps = 0;
+    std::atomic<unsigned long> timeouts{0};
 
     // Where this machine actually sits on the cable, which is not its
     // quadrant: the coordinator packs whoever is attached into positions from
@@ -234,10 +236,30 @@ void GbaInstance::attach_cable(CableGroup* group, int preferred_id) {
 void GbaInstance::cable_wait() {
     if (!cable_) return;
     std::unique_lock<std::mutex> lk(cable_->mutex);
-    cable_->cv.wait(lk, [this] {
-        return !cable_->asleep.load(std::memory_order_relaxed) ||
-               cable_->leaving;
-    });
+
+    // Bounded, because only a running machine can wake a sleeping one, so a
+    // cable on which everybody is asleep stays that way for good. mGBA guards
+    // that state with an assertion which does nothing in a release build, and
+    // it is reachable: hand a machine a different cartridge while it is
+    // suspended and the whole cable can settle into it.
+    //
+    // Waiting forever turns a moment's confusion into a locked-up window.
+    // Giving up and running turns it into a hitch, and into exactly what a
+    // real cable does when one console stops answering — the others carry on
+    // and the game notices its data is stale. The previous project reached the
+    // same conclusion about its own cable for the same reason.
+    const bool woken = cable_->cv.wait_for(
+        lk, std::chrono::milliseconds(50), [this] {
+            return !cable_->asleep.load(std::memory_order_relaxed) ||
+                   cable_->leaving;
+        });
+    if (!woken) {
+        // Clear it locally or run_frame will hand control straight back and
+        // spin. The coordinator will suspend this machine again if it still
+        // wants to.
+        cable_->asleep.store(false, std::memory_order_relaxed);
+        cable_->timeouts.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void GbaInstance::wake_cable() {
@@ -270,6 +292,10 @@ int GbaInstance::cable_player_id() const {
 
 unsigned long GbaInstance::cable_sleeps() const {
     return cable_ ? cable_->sleeps : 0;
+}
+
+unsigned long GbaInstance::cable_timeouts() const {
+    return cable_ ? cable_->timeouts.load(std::memory_order_relaxed) : 0;
 }
 
 GbaInstance::~GbaInstance() { close(); }

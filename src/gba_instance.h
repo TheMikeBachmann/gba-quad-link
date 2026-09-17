@@ -176,6 +176,8 @@ public:
     int cable_devices() const;
     int cable_player_id() const;
     unsigned long cable_sleeps() const;
+    // Times this machine gave up waiting to be woken. Should be zero.
+    unsigned long cable_timeouts() const;
 
     // Defined in the implementation; named here only so the coordinator's
     // callbacks, which are free functions, can reach it.

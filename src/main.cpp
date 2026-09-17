@@ -240,6 +240,9 @@ int main(int argc, char** argv) {
     // link screen is four times the work for one person, and the menus are
     // identical. One input driving all of them gets them there together.
     bool log_sio = false;
+    // Hands each machine a different cartridge in turn while everything runs,
+    // which is the one thing the setup screen does that no other test reaches.
+    bool self_test_restart = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -294,6 +297,7 @@ int main(int argc, char** argv) {
         else if (a == "--cable") cable_all = true;
         else if (a == "--mirror-input") mirror_start = true;
         else if (a == "--log-sio") log_sio = true;
+        else if (a == "--self-test-restart") self_test_restart = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -605,7 +609,15 @@ int main(int argc, char** argv) {
                                      gql::LinkMode new_mode) {
         Machine& m = machines[i];
         m.stop.store(true);
-        m.gba.shutdown_link();          // in case it is parked in a stall
+        // Both of the ways a machine can be somewhere other than the top of
+        // its loop. Setting stop is not enough for either: a machine waiting
+        // on Dolphin for cycles that are not coming never reaches the check,
+        // and one the coordinator has suspended is asleep on a condition
+        // variable that only the coordinator was ever going to signal. This
+        // join runs on the host thread, so missing either of them does not
+        // hang a machine, it hangs the window.
+        m.gba.shutdown_link();
+        m.gba.wake_cable();
         if (m.thread.joinable()) m.thread.join();
         m.gba.close();
 
@@ -675,7 +687,22 @@ int main(int argc, char** argv) {
     };
 
     auto last_report = std::chrono::steady_clock::now();
+    auto next_self_test = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(4);
+    int self_test_at = 0;
     while (!g_quit.load(std::memory_order_relaxed)) {
+        if (self_test_restart && self_test_at < players &&
+            std::chrono::steady_clock::now() >= next_self_test) {
+            std::printf("self-test: restarting p%d\n", self_test_at + 1);
+            std::fflush(stdout);
+            restart_machine(self_test_at, machines[self_test_at].rom_path,
+                            machines[self_test_at].mode);
+            std::printf("self-test: p%d back\n", self_test_at + 1);
+            std::fflush(stdout);
+            ++self_test_at;
+            next_self_test = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(3);
+        }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             // Either window being open means ImGui needs the events. Feeding
@@ -1142,6 +1169,9 @@ int main(int argc, char** argv) {
                                 machines[i].gba.sio_mode(),
                                 (unsigned)machines[i].gba.rcnt(),
                                 machines[i].gba.cable_sleeps());
+                    if (machines[i].gba.cable_timeouts())
+                        std::printf("[!%lu stalls]",
+                                    machines[i].gba.cable_timeouts());
             }
             std::printf("   audio: %llu underruns, %llu drops\n",
                         (unsigned long long)audio.underruns.load(),
