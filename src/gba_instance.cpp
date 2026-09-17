@@ -148,6 +148,7 @@ struct GbaInstance::Cable {
     std::mutex mutex;
     std::condition_variable cv;
     bool asleep = false;
+    unsigned long sleeps = 0;
     bool leaving = false;      // shutting down; never sleep again
     int preferred_id = -1;
     bool attached = false;
@@ -165,6 +166,7 @@ void cable_sleep(struct mLockstepUser* user) {
     GbaInstance::Cable* c = cable_of(user);
     std::lock_guard<std::mutex> lk(c->mutex);
     c->asleep = true;
+    ++c->sleeps;
 }
 
 void cable_wake(struct mLockstepUser* user) {
@@ -222,6 +224,30 @@ void GbaInstance::wake_cable() {
 }
 
 bool GbaInstance::on_cable() const { return cable_ && cable_->attached; }
+
+unsigned GbaInstance::cable_id() const {
+    return cable_ ? cable_->driver.lockstepId : 0;
+}
+
+int GbaInstance::cable_devices() const {
+    if (!cable_ || !cable_->attached) return -1;
+    struct GBASIODriver* d = &cable_->driver.d;
+    return d->connectedDevices ? d->connectedDevices(d) : -1;
+}
+
+int GbaInstance::cable_player_id() const {
+    if (!cable_ || !cable_->driver.lockstepId) return -1;
+    struct GBASIOLockstepCoordinator* c = cable_->driver.coordinator;
+    if (!c) return -1;
+    struct GBASIOLockstepPlayer* p =
+        (struct GBASIOLockstepPlayer*) TableLookup(&c->players,
+                                                   cable_->driver.lockstepId);
+    return p ? p->playerId : -1;
+}
+
+unsigned long GbaInstance::cable_sleeps() const {
+    return cable_ ? cable_->sleeps : 0;
+}
 
 GbaInstance::~GbaInstance() { close(); }
 

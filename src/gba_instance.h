@@ -153,6 +153,14 @@ public:
 
     bool on_cable() const;
 
+    // What the coordinator thinks of this machine. Zero id means it never
+    // registered; zero devices means the guest is being told nothing else is
+    // on the cable, which is exactly what a game that cannot find anyone sees.
+    unsigned cable_id() const;
+    int cable_devices() const;
+    int cable_player_id() const;
+    unsigned long cable_sleeps() const;
+
     // Defined in the implementation; named here only so the coordinator's
     // callbacks, which are free functions, can reach it.
     struct Cable;

@@ -137,6 +137,10 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
     auto joybus_mark = std::chrono::steady_clock::time_point{};
     constexpr auto kJoybusHold = std::chrono::milliseconds(750);
 
+    // Refreshed with the frame rate rather than every frame: reading it means
+    // looking the player up in the coordinator's table.
+    int cable_pid = -1;
+
     while (!g_quit.load(std::memory_order_relaxed) &&
            !me->stop.load(std::memory_order_relaxed)) {
         me->gba.set_keys(g_input_held.load(std::memory_order_relaxed)
@@ -194,9 +198,21 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
                           std::memory_order_relaxed);
             fps_mark = now;
             fps_frame = frame;
+            if (me->gba.on_cable()) cable_pid = me->gba.cable_player_id();
         }
 
-        if (linked) {
+        // On the cable, only the parent is paced. The coordinator already
+        // keeps the others in step with it — that is its whole job — and it
+        // does so by suspending whoever has run ahead, which is a far tighter
+        // instrument than four independent sleeps.
+        //
+        // Four machines each sleeping to hold 59.7fps at their own frame
+        // boundaries is the same mistake as pacing a guest Dolphin is waiting
+        // on, in a different costume: a child asleep at the wrong moment is a
+        // child that cannot take part in the transfer the parent is running,
+        // and the game sees a cable with nobody on the end of it.
+        const bool cable_child = me->gba.on_cable() && cable_pid > 0;
+        if (linked || cable_child) {
             deadline = now;
         } else {
             deadline += period;
@@ -216,6 +232,10 @@ int main(int argc, char** argv) {
     std::string host;               // empty: run unlinked
     std::string rom_dir_arg;        // empty: look in the usual places
     bool cable_all = false;         // every machine on one link cable
+    // Four machines that have to be walked through the same menus to reach a
+    // link screen is four times the work for one person, and the menus are
+    // identical. One input driving all of them gets them there together.
+    bool mirror_input = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -248,6 +268,7 @@ int main(int argc, char** argv) {
         else if (a == "--host") host = next();
         else if (a == "--rom-dir") rom_dir_arg = next();
         else if (a == "--cable") cable_all = true;
+        else if (a == "--mirror-input") mirror_input = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -260,7 +281,8 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P]]... [--rom-dir D] [--cable]\n"
+                "          [--player N [--rom P]]... [--rom-dir D]\n"
+                "          [--cable] [--mirror-input]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
                 "          [--scale N] [--fullscreen] [--integer-scale]\n"
                 "          [--audio-player 1-4] [--verbose]\n"
@@ -633,9 +655,19 @@ int main(int argc, char** argv) {
         }
 
         const Uint8* ks = SDL_GetKeyboardState(nullptr);
-        for (int i = 0; i < players; ++i)
-            machines[i].keys.store(controls.read(i, pads[i], ks),
-                                   std::memory_order_relaxed);
+        if (mirror_input) {
+            // Whatever any player presses drives every machine. Only for
+            // getting four guests through the same menu; useless for playing.
+            uint16_t all = 0x03FF;
+            for (int i = 0; i < players; ++i)
+                all &= controls.read(i, pads[i], ks);
+            for (int i = 0; i < players; ++i)
+                machines[i].keys.store(all, std::memory_order_relaxed);
+        } else {
+            for (int i = 0; i < players; ++i)
+                machines[i].keys.store(controls.read(i, pads[i], ks),
+                                       std::memory_order_relaxed);
+        }
 
         int win_w = 0, win_h = 0;
         SDL_GetRendererOutputSize(ren, &win_w, &win_h);
@@ -926,9 +958,18 @@ int main(int argc, char** argv) {
         const auto now = std::chrono::steady_clock::now();
         if (now - last_report >= std::chrono::seconds(5)) {
             std::printf("fps:");
-            for (int i = 0; i < players; ++i)
+            for (int i = 0; i < players; ++i) {
                 std::printf(" p%d %5.2f/%s", i + 1, machines[i].fps.load(),
                             gql::link_state_name(machines[i].link.load()));
+                if (machines[i].mode == gql::LinkMode::Cable)
+                    std::printf("[id%u pid%d dev%d sio%d rcnt%04X slp%lu]",
+                                machines[i].gba.cable_id(),
+                                machines[i].gba.cable_player_id(),
+                                machines[i].gba.cable_devices(),
+                                machines[i].gba.sio_mode(),
+                                (unsigned)machines[i].gba.rcnt(),
+                                machines[i].gba.cable_sleeps());
+            }
             std::printf("   audio: %llu underruns, %llu drops\n",
                         (unsigned long long)audio.underruns.load(),
                         (unsigned long long)audio.dropped.load());
