@@ -85,6 +85,8 @@ target_link_libraries(imgui PUBLIC SDL2::SDL2)
 add_executable(gba-quad-link
     src/main.cpp
     src/gba_instance.cpp
+    src/layout.cpp
+    src/machine.cpp
     src/controls.cpp
     src/paths.cpp)
 target_include_directories(gba-quad-link PRIVATE src)

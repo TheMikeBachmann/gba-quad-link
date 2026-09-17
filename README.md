@@ -8,9 +8,11 @@ The use case it is built for is *The Legend of Zelda: Four Swords Adventures* �
 Dolphin on a PC, this on a Steam Machine wired to the TV, four people on the
 couch with the GBA screens they are supposed to have.
 
-> **Status: milestone one.** A single libmgba core runs in a window with
-> controller input and audio. The Dolphin socket client and the four-way
-> compositor are not written yet. See [Milestones](#milestones).
+> **Status: milestone three.** Four cores run in a 2x2 window, linked to a real
+> Dolphin. Verified against Pac-Man Vs.: the GBA accepts a multiboot download
+> over the link and plays, with both sides at full speed. Four-way slot
+> ordering is so far only tested against the mock. See
+> [Milestones](#milestones).
 
 ## Building
 
@@ -38,13 +40,32 @@ git submodule update --init --depth 1
 
 | Flag | |
 |---|---|
-| `--rom PATH` | the ROM to boot |
-| `--no-rom` | boot the BIOS with an empty cartridge slot (see below) |
+| `--players 1-4` | how many GBAs (default 4) |
+| `--host H` | the machine Dolphin is on; omit to run unlinked |
+| `--data-port N` `--clock-port N` | default 54970 / 49420 |
+| `--rom PATH` | a cartridge; omit to boot the BIOS with an empty slot |
 | `--bios PATH` | a real GBA BIOS dump |
+| `--audio-player N` | which machine is heard (default 1) |
 | `--scale N` | initial window scale |
 | `--fullscreen` | |
 | `--integer-scale` | whole-pixel scaling; crisper, but leaves a border |
 | `--verbose` | mGBA's full log rather than warnings and errors |
+
+**No ROM is the normal case.** Four Swords Adventures and Pac-Man Vs. hand each
+GBA its program over the link rather than expecting a cartridge, so each core
+boots its BIOS with an empty slot and waits to be given one.
+
+### Without a Dolphin
+
+`tools/mock_dolphin.py` stands in for Dolphin's SI ports: it hands out cycle
+slices, issues JOY commands, and on request stalls with the sockets still open.
+It is enough to develop the link against, but it cannot multiboot, so it can
+never prove more than that our end behaves.
+
+```sh
+./tools/mock_dolphin.py --players 4 &
+./build/gba-quad-link --players 4 --bios bios/gba_bios.bin --host 127.0.0.1
+```
 
 No ROM or BIOS is included and none ever will be. Put your own in `roms/` and
 `bios/`; both directories are ignored by git.
@@ -94,10 +115,11 @@ waiting to be handed a program.
 
 - [x] **One core.** A libmgba core in an SDL window, booting a commercial ROM,
       with controller input and clean audio.
-- [ ] **The link.** The Dolphin socket client, clock-driven, against a real
-      Dolphin instance. One core first.
-- [ ] **Four.** The 2×2 compositor, per-player controller assignment and the
-      controls menu.
+- [x] **The link.** Clock-driven, against real Dolphin. Pac-Man Vs. multiboots
+      the guest and plays at full speed on both sides.
+- [x] **Four.** The 2x2 compositor with status gutters, per-player controller
+      assignment and the controls menu. Slot ordering verified against the
+      mock; four-way against Dolphin needs Four Swords Adventures.
 - [ ] **Packaging.** AppImage with the static runtime, and a Steam shortcut.
 
 ## Notes for anyone reading the code
@@ -105,9 +127,11 @@ waiting to be handed a program.
 Three things that look like they should have been copied from a working
 four-GBA app and could not be:
 
-- **Geometry.** Four 240×160 screens tile to 480×320, which is 3:2 and
-  pillarboxes on a 16:9 TV. The plan is to spend the side gutters on per-player
-  link status rather than black them out.
+- **Geometry.** Four 240x160 screens tile to 480x320, which is 3:2 and
+  pillarboxes on a 16:9 TV. The side gutters carry per-player link status
+  rather than being blacked out — 150px each at 1080p, 300 at 4K. Below 96px
+  they cannot hold a legible line, so they are dropped and the screens take the
+  space.
 - **Audio rate.** There is no constant to hardcode. A GBA's output rate is
   whatever the running program's `SOUNDBIAS` resolution field says — 32768 Hz
   from reset, doubling per step to 262144 Hz, changeable by a register write at
@@ -115,7 +139,15 @@ four-GBA app and could not be:
   the difference.
 - **Pacing.** A standalone core paces itself to the console refresh. Under
   Dolphin that inverts and the clock socket drives, so the pacing is a fallback
-  for unlinked cores rather than the normal path.
+  for unlinked cores rather than the normal path — and it must not apply to a
+  linked one. Dolphin blocks the thread it emulates the GameCube on until the
+  GBA answers, so a guest politely sleeping to hold 59.7fps costs the host
+  two thirds of its frame rate. Measured: 22fps, against 59.94 without.
+
+- **Pausing.** The previous project paused every machine while the controls
+  menu was open. That cannot happen here for the same reason: a paused core
+  stops answering and takes the GameCube down with it. Input is withheld
+  instead, which is what the pause was for.
 
 ## Licence
 
