@@ -371,12 +371,19 @@ int main(int argc, char** argv) {
 
     SDL_GameController* pads[kMaxPlayers] = {nullptr, nullptr, nullptr, nullptr};
     SDL_JoystickID pad_ids[kMaxPlayers] = {-1, -1, -1, -1};
-    Machine machines[kMaxPlayers];
-    for (int i = 0; i < kMaxPlayers; ++i) machines[i].index = i;
-
+    // Declared before the machines, and this is not a matter of taste. Local
+    // objects are destroyed in reverse order, and a machine's destructor
+    // detaches it from the cable — so a cable declared after them is torn down
+    // first and every machine then reaches into a coordinator that no longer
+    // exists. It survived review because it only goes wrong on the way out,
+    // and only crashes when the freed page happens to be unmapped.
+    //
     // One cable, shared by whichever machines are plugged into it. Cheap when
     // nothing is.
     gql::CableGroup cable;
+
+    Machine machines[kMaxPlayers];
+    for (int i = 0; i < kMaxPlayers; ++i) machines[i].index = i;
 
     // Claim the lowest free quadrant, so pads land on players 1..4 in the
     // order they appear and a removed pad's slot is reused.

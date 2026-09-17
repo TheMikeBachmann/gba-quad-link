@@ -22,3 +22,4 @@ runtime-x86_64
 # Packaging scratch. squashfs-root is where --appimage-extract unpacks.
 build/AppDir/
 squashfs-root/
+build-asan/
