@@ -249,6 +249,8 @@ int main(int argc, char** argv) {
     // every machine. The setup screen is the real interface; this is for
     // getting at it from a script.
     std::string per_rom[kMaxPlayers];
+    gql::LinkMode per_mode[kMaxPlayers] = {};
+    bool per_mode_set[kMaxPlayers] = {};
     int section = -1;
 
     for (int i = 1; i < argc; ++i) {
@@ -265,6 +267,25 @@ int main(int argc, char** argv) {
         else if (a == "--rom") {
             if (section >= 0) per_rom[section] = next();
             else rom_path = next();
+        }
+        else if (a == "--link") {
+            const std::string m = next();
+            gql::LinkMode mode = gql::LinkMode::None;
+            if (m == "cable") mode = gql::LinkMode::Cable;
+            else if (m == "dolphin") mode = gql::LinkMode::Dolphin;
+            else if (m != "none") {
+                std::fprintf(stderr, "--link takes none, cable or dolphin\n");
+                return 2;
+            }
+            if (section >= 0) {
+                per_mode[section] = mode;
+                per_mode_set[section] = true;
+            } else {
+                for (int k = 0; k < kMaxPlayers; ++k) {
+                    per_mode[k] = mode;
+                    per_mode_set[k] = true;
+                }
+            }
         }
         else if (a == "--bios") bios_path = next();
         else if (a == "--controls") cfg_path = next();
@@ -285,7 +306,8 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P]]... [--rom-dir D]\n"
+                "          [--player N [--rom P] [--link MODE]]...\n"
+                "          [--rom-dir D]\n"
                 "          [--cable] [--mirror-input]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
                 "          [--scale N] [--fullscreen] [--integer-scale]\n"
@@ -470,9 +492,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (cable_all) {
+    for (int i = 0; i < players; ++i)
+        if (per_mode_set[i]) machines[i].mode = per_mode[i];
+    if (cable_all)
         for (int i = 0; i < players; ++i)
             machines[i].mode = gql::LinkMode::Cable;
+
+    {
+        int on_cable = 0;
+        for (int i = 0; i < players; ++i)
+            if (machines[i].mode == gql::LinkMode::Cable) ++on_cable;
+        if (on_cable) {
         // All of them, here, before any thread starts. Attaching from each
         // machine's own thread let the first one run for however long it took
         // the last one to be scheduled — thousands of frames, with the
@@ -483,10 +513,17 @@ int main(int argc, char** argv) {
         //
         // A machine's position on the cable is its quadrant, so player one is
         // the parent, which is what the numbering means to a game.
+        // The quadrant is only a *preference*. The coordinator packs whoever
+        // is actually on the cable into positions 0..n-1 with no gaps, so if
+        // players one and three are the only two plugged in, they become
+        // cable positions 0 and 1 — the third quadrant is the link's second
+        // player. That is what a real cable does, and it is why a machine
+        // asks for its quadrant rather than being told its position.
         for (int i = 0; i < players; ++i)
-            machines[i].gba.attach_cable(&cable, i);
-        std::printf("link cable: %d machines chained "
-                    "(player 1 is the parent)\n", players);
+            if (machines[i].mode == gql::LinkMode::Cable)
+                machines[i].gba.attach_cable(&cable, i);
+        std::printf("link cable: %d machines chained\n", on_cable);
+        }
     }
 
     for (int i = 0; i < players; ++i) {
