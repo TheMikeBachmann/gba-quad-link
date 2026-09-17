@@ -38,6 +38,12 @@ void install_logger(bool verbose);
 // untagged, which is the default.
 void set_log_player(int player);
 
+// Narrow the log to the serial port, at full detail. Everything mGBA logs
+// about a link, and nothing about anything else — with four guests, its full
+// output is thousands of lines a second and the twenty that matter are not
+// findable in it.
+void log_only_sio();
+
 class CableGroup;
 
 class GbaInstance {
@@ -66,11 +72,21 @@ public:
               std::string* err);
     void close();
 
-    // Runs until the next frame is complete. Once the Dolphin link is attached
-    // this stops being a bounded call: the clock socket decides when the core
-    // may advance, and mGBA's driver waits inside the run for it. Callers must
-    // hold no lock the host thread wants.
-    void run_frame();
+    // Runs until a video frame completes, or until something suspends the
+    // core, whichever comes first. True if a frame was finished.
+    //
+    // Not mCore::runFrame, which is a trap for anything driving a core
+    // alongside others. That loops until the frame counter moves and ignores
+    // the CPU interrupt, so a core told to stop keeps running to the end of
+    // its frame — up to 280,000 cycles after the coordinator believes it has
+    // stopped. mGBA's own thread calls runLoop for exactly this reason. The
+    // link cable needs a core that stops when it is told to, and "next
+    // frame" is far too coarse a moment to stop at.
+    //
+    // Once a link is attached this also stops being a bounded call: the far
+    // end decides when the core may advance. Callers must hold no lock the
+    // host thread wants.
+    bool run_frame();
 
     // Active-low KEYINPUT, the convention the binding model speaks. mGBA wants
     // the opposite; the inversion happens here so only one place knows.

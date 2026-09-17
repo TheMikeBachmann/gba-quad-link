@@ -12,6 +12,7 @@
 #include <mgba-util/audio-resampler.h>
 #include <mgba-util/vfs.h>
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/video.h>
 #include <mgba/internal/gba/sio.h>
 #include <mgba/internal/gba/sio/dolphin.h>
 #include <mgba/internal/gba/sio/lockstep.h>
@@ -42,10 +43,12 @@ constexpr std::size_t kHostBufferFrames = 4096;
 thread_local int t_log_player = -1;
 
 int g_log_levels = mLOG_FATAL | mLOG_ERROR | mLOG_WARN;
+int g_only_category = -1;
 
 void log_to_stderr(struct mLogger*, int category, enum mLogLevel level,
                    const char* format, va_list args) {
     if (!(level & g_log_levels)) return;
+    if (g_only_category >= 0 && category != g_only_category) return;
     char line[512];
     std::vsnprintf(line, sizeof line, format, args);
     const char* cat = mLogCategoryName(category);
@@ -111,6 +114,12 @@ void install_logger(bool verbose) {
 
 void set_log_player(int player) { t_log_player = player; }
 
+void log_only_sio() {
+    g_only_category = mLogCategoryById("gba.sio");
+    g_log_levels = mLOG_ALL;
+    mLogSetDefaultLogger(&g_logger);
+}
+
 // mGBA's Dolphin driver, and the one flag telling us whether it was ever
 // handed a live pair of sockets. Kept out of the header with the rest.
 struct GbaInstance::Link {
@@ -147,7 +156,10 @@ struct GbaInstance::Cable {
 
     std::mutex mutex;
     std::condition_variable cv;
-    bool asleep = false;
+    // Read on the hot path between CPU chunks, so an atomic rather than
+    // something needing the mutex; the mutex and the condition variable are
+    // only for the waiting itself.
+    std::atomic<bool> asleep{false};
     unsigned long sleeps = 0;
     bool leaving = false;      // shutting down; never sleep again
     int preferred_id = -1;
@@ -165,7 +177,7 @@ GbaInstance::Cable* cable_of(struct mLockstepUser* user) {
 void cable_sleep(struct mLockstepUser* user) {
     GbaInstance::Cable* c = cable_of(user);
     std::lock_guard<std::mutex> lk(c->mutex);
-    c->asleep = true;
+    c->asleep.store(true, std::memory_order_relaxed);
     ++c->sleeps;
 }
 
@@ -173,7 +185,7 @@ void cable_wake(struct mLockstepUser* user) {
     GbaInstance::Cable* c = cable_of(user);
     {
         std::lock_guard<std::mutex> lk(c->mutex);
-        c->asleep = false;
+        c->asleep.store(false, std::memory_order_relaxed);
     }
     c->cv.notify_all();
 }
@@ -209,7 +221,8 @@ void GbaInstance::cable_wait() {
     if (!cable_) return;
     std::unique_lock<std::mutex> lk(cable_->mutex);
     cable_->cv.wait(lk, [this] {
-        return !cable_->asleep || cable_->leaving;
+        return !cable_->asleep.load(std::memory_order_relaxed) ||
+               cable_->leaving;
     });
 }
 
@@ -218,7 +231,7 @@ void GbaInstance::wake_cable() {
     {
         std::lock_guard<std::mutex> lk(cable_->mutex);
         cable_->leaving = true;
-        cable_->asleep = false;
+        cable_->asleep.store(false, std::memory_order_relaxed);
     }
     cable_->cv.notify_all();
 }
@@ -467,9 +480,25 @@ bool GbaInstance::linked() const {
            GBASIODolphinIsConnected(&link_->dol);
 }
 
-void GbaInstance::run_frame() {
-    if (!core_) return;
-    core_->runFrame(core_);
+bool GbaInstance::run_frame() {
+    if (!core_) return false;
+    const uint32_t start = core_->frameCounter(core_);
+
+    // The same safety bound mCore::runFrame uses: a core that is halted, or
+    // waiting on a link that has gone quiet, will not finish a frame, and this
+    // must still come back so the caller can notice.
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+    const int32_t begin = mTimingCurrentTime(&gba->timing);
+    const int32_t bound = VIDEO_TOTAL_LENGTH + VIDEO_HORIZONTAL_LENGTH;
+
+    while (core_->frameCounter(core_) == start &&
+           mTimingCurrentTime(&gba->timing) - begin < bound) {
+        core_->runLoop(core_);
+        // Suspended mid-frame. Hand control back so the caller can wait; the
+        // frame is finished later, from wherever it got to.
+        if (cable_ && cable_->asleep.load(std::memory_order_relaxed)) break;
+    }
+    return core_->frameCounter(core_) != start;
 }
 
 void GbaInstance::set_keys(uint16_t keyinput) {

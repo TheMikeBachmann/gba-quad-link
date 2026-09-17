@@ -99,12 +99,8 @@ struct AudioOut {
 void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
     gql::set_log_player(me->index);
 
-    // On the cable, the machine's position is its quadrant, so player one is
-    // the parent — which is what the cable's own numbering means to a game.
-    if (me->mode == gql::LinkMode::Cable && cable) {
-        me->gba.attach_cable(cable, me->index);
+    if (me->mode == gql::LinkMode::Cable)
         me->link.store(LinkState::Cable, std::memory_order_relaxed);
-    }
 
     // Must happen here, not on the host thread: attaching schedules the
     // driver's first event against this core's timing.
@@ -146,13 +142,13 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
         me->gba.set_keys(g_input_held.load(std::memory_order_relaxed)
                              ? 0x03FF
                              : me->keys.load(std::memory_order_relaxed));
-        me->gba.run_frame();
-        // The coordinator stops a machine that has run ahead by marking it
-        // asleep and forcing its CPU out, so run_frame() came back early and
-        // the waiting belongs here.
+        // May come back without a finished frame: the coordinator suspends a
+        // machine that has run ahead, and it stops where it is rather than at
+        // a frame boundary.
+        const bool completed = me->gba.run_frame();
         me->gba.cable_wait();
         me->gba.note_sio_mode();
-        ++frame;
+        if (completed) ++frame;
 
         const std::size_t got = me->gba.drain_audio(sink.data(),
                                                     sink.size() / 2);
@@ -160,7 +156,7 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
         // only the one holding the speakers passes the samples on.
         if (audio) audio->push(sink.data(), got);
 
-        {
+        if (completed) {
             std::lock_guard<std::mutex> lk(me->fb_mutex);
             std::memcpy(me->pixels.data(), me->gba.pixels(),
                         me->pixels.size() * sizeof(uint32_t));
@@ -191,6 +187,7 @@ void machine_thread(Machine* me, AudioOut* audio, gql::CableGroup* cable) {
         }
 
         const auto now = std::chrono::steady_clock::now();
+        if (!completed) continue;   // pace and report on whole frames only
         if (now - fps_mark >= std::chrono::seconds(1)) {
             const double secs = std::chrono::duration<double>(
                 now - fps_mark).count();
@@ -236,6 +233,7 @@ int main(int argc, char** argv) {
     // link screen is four times the work for one person, and the menus are
     // identical. One input driving all of them gets them there together.
     bool mirror_input = false;
+    bool log_sio = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -269,6 +267,7 @@ int main(int argc, char** argv) {
         else if (a == "--rom-dir") rom_dir_arg = next();
         else if (a == "--cable") cable_all = true;
         else if (a == "--mirror-input") mirror_input = true;
+        else if (a == "--log-sio") log_sio = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -298,6 +297,7 @@ int main(int argc, char** argv) {
     if (scale < 1) scale = 1;
     if (audio_player < 0 || audio_player >= players) audio_player = 0;
     gql::install_logger(verbose);
+    if (log_sio) gql::log_only_sio();
 
     const std::string settings_dir = gql::config_dir();
     if (cfg_path.empty()) {
@@ -468,6 +468,18 @@ int main(int argc, char** argv) {
     if (cable_all) {
         for (int i = 0; i < players; ++i)
             machines[i].mode = gql::LinkMode::Cable;
+        // All of them, here, before any thread starts. Attaching from each
+        // machine's own thread let the first one run for however long it took
+        // the last one to be scheduled — thousands of frames, with the
+        // coordinator free-running because it believed it had one player. Any
+        // two guests that are meant to hand each other a word every frame
+        // cannot be that far apart. mGBA's own frontend attaches its players
+        // together for the same reason.
+        //
+        // A machine's position on the cable is its quadrant, so player one is
+        // the parent, which is what the numbering means to a game.
+        for (int i = 0; i < players; ++i)
+            machines[i].gba.attach_cable(&cable, i);
         std::printf("link cable: %d machines chained "
                     "(player 1 is the parent)\n", players);
     }
