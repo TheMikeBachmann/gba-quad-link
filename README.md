@@ -1,18 +1,29 @@
 # gba-quad-link
 
-Four Game Boy Advance screens in one window, each with its own controller, all
-four linked over TCP to [Dolphin](https://dolphin-emu.org/) running a GameCube
-game on another machine.
+Four Game Boy Advance screens in one window, each with its own controller —
+playing separate games, linked to each other over an emulated link cable, or
+linked over the network to [Dolphin](https://dolphin-emu.org/) running a
+GameCube game on another machine. In any combination, at the same time.
 
-The use case it is built for is *The Legend of Zelda: Four Swords Adventures* —
-Dolphin on a PC, this on a Steam Machine wired to the TV, four people on the
-couch with the GBA screens they are supposed to have.
+The use case it was built for is *The Legend of Zelda: Four Swords Adventures*
+— Dolphin on a PC, this on a machine wired to the TV, four people on the couch
+with the GBA screens they are supposed to have. It turned out to be more
+generally useful than that.
 
-> **Status: milestone three.** Four cores run in a 2x2 window, linked to a real
-> Dolphin. Verified against Pac-Man Vs.: the GBA accepts a multiboot download
-> over the link and plays, with both sides at full speed. Four-way slot
-> ordering is so far only tested against the mock. See
-> [Milestones](#milestones).
+## What it does
+
+|  |  |
+|---|---|
+| Four separate games | Each quadrant takes its own cartridge and keeps its own battery save. |
+| Four on a link cable | Mario Kart, Kirby, anything that links. Grouped automatically by cartridge. |
+| Four to a GameCube | Four Swords Adventures. All four multiboot from Dolphin over TCP. |
+| One to a GameCube | Pac-Man Vs., the Tingle Tuner, Metroid Prime's Fusion link. |
+| Any mix of the above | Two on a cable, one on the GameCube, one playing alone. |
+
+Verified against real Dolphin and real games, not just in theory: Four Swords
+Adventures multiboots all four quadrants and runs at 59.94fps on both sides;
+Pac-Man Vs. multiboots one; four Mario Karts find each other over the cable and
+race.
 
 ## Building
 
@@ -23,131 +34,113 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-Needs GCC or Clang, CMake 3.20+, Ninja and SDL2. Everything else — the
-emulation core and the menu toolkit — is a submodule.
-
-If you cloned without `--recurse-submodules`:
-
-```sh
-git submodule update --init --depth 1
-```
+GCC or Clang, CMake 3.20+, Ninja, SDL2. The emulation core and the menu toolkit
+are submodules; nothing else is needed.
 
 ## Running
 
 ```sh
-./build/gba-quad-link --rom path/to/game.gba --bios path/to/gba_bios.bin
+./build/gba-quad-link --bios path/to/gba_bios.bin --rom-dir path/to/roms
 ```
+
+Then press **F2** and choose cartridges. Everything else has a sensible default.
 
 | Flag | |
 |---|---|
-| `--players 1-4` | how many GBAs (default 4) |
-| `--host H` | the machine Dolphin is on; omit to run unlinked |
-| `--data-port N` `--clock-port N` | default 54970 / 49420 |
-| `--rom PATH` | a cartridge; omit to boot the BIOS with an empty slot |
 | `--bios PATH` | a real GBA BIOS dump |
-| `--audio-player N` | which machine is heard (default 1) |
-| `--scale N` | initial window scale |
-| `--fullscreen` | |
-| `--integer-scale` | whole-pixel scaling; crisper, but leaves a border |
-| `--verbose` | mGBA's full log rather than warnings and errors |
+| `--rom-dir D` | where your cartridges live; `.gba`, `.zip` and `.7z` all work |
+| `--host H` | the machine Dolphin is running on |
+| `--players 1-4` | |
+| `--player N ...` | opens a section: `--rom` and `--link` after it apply to that player alone |
+| `--link cable\|dolphin` | |
+| `--audio-player N` | which quadrant is heard (default 1) |
+| `--fullscreen` `--scale N` `--integer-scale` | |
+| `--verbose` `--log-sio` | mGBA's log, or only what it says about the serial port |
 
-**No ROM is the normal case.** Four Swords Adventures and Pac-Man Vs. hand each
-GBA its program over the link rather than expecting a cartridge, so each core
-boots its BIOS with an empty slot and waits to be given one.
+No BIOS and no ROMs are included, and none ever will be. A BIOS dump goes beside
+the binary, in `~/.local/share/gba-quad-link/`, or wherever `--bios` points.
+
+### Keys
+
+| | |
+|---|---|
+| **F1** | controls — bind any button to a key or a pad, per player |
+| **F2** | setup — cartridges, cable groups, Dolphin |
+| **F3** | mirror one player's controls to all four |
+| **Select+Start** | opens both menus from a pad, for Game Mode |
+
+**F3** is for walking four machines through the same menus at once. Turn it off
+before anyone has to choose a character.
 
 ### Without a Dolphin
 
-`tools/mock_dolphin.py` stands in for Dolphin's SI ports: it hands out cycle
-slices, issues JOY commands, and on request stalls with the sockets still open.
-It is enough to develop the link against, but it cannot multiboot, so it can
-never prove more than that our end behaves.
+`tools/mock_dolphin.py` stands in for Dolphin's SI ports — cycle slices, JOY
+commands, and on request a stall with the sockets left open. Enough to develop
+the link against; it cannot multiboot, so it can only ever prove our end
+behaves.
+
+## How it works
+
+Each GBA runs on its own thread and owns its core outright. The host thread
+never touches one: it writes keys, copies finished frames out under a lock, and
+draws at its own rate. That separation is the whole design, because a guest can
+block for a long time and the window has to stay alive and the other three have
+to keep running.
+
+**Nothing paces itself if something else is pacing it.** A machine on its own
+is held to 59.7275fps. A machine on a GameCube runs exactly the cycles Dolphin
+grants and is not paced here at all — Dolphin blocks the thread it emulates the
+GameCube on until the guest answers, so a guest sleeping politely to look
+punctual costs the host two thirds of its frame rate. On a cable only the parent
+is paced, and mGBA's coordinator holds the rest in step with it.
+
+**Cables are per group, not per room.** A cable carries one parent, at position
+zero, and only the parent starts transfers — so one cable shared by everyone
+means whichever pair does not own position zero never links. Machines are
+grouped by cartridge, because you play with the people playing your game, with
+an A/B/C/D override for the cases where that is wrong: the Mario Advance games
+all link to play Mario Bros., Pokémon versions trade between themselves, and
+single-pak multiplayer has one cartridge between four people.
+
+**Four screens tile to 3:2.** A 16:9 display has about eleven percent spare at
+each side, and it carries a status column per side — player, link state, frame
+rate, pad — because what goes wrong here is mostly one of the four quietly not
+being connected, and that is otherwise invisible. Below 96px there is no room
+for a legible line, so they are dropped and the screens take the space.
+
+## Known limitations
+
+**Joining a live cable interrupts it.** Two people linked, a third loads the
+same game, and both get a communication error. This is authentic: a console
+powered on next to a live cable is on the bus immediately, the device count
+changes, and the game is right to complain. Press Start to re-handshake. Loading
+everyone's cartridge before anyone opens a link menu avoids it entirely.
+
+It cannot be worked around by waiting until a guest "wants" the link, because
+that is not observable — Mario Kart opens its serial port during boot and holds
+it for the entire time it sits on the title screen. Measured: 1700 unbroken
+frames of link mode with nobody playing.
+
+**Controllers need Game Mode.** SDL hides Steam Input's virtual gamepads from
+processes it does not believe are Steam games, and on SteamOS those virtual pads
+are how a paired controller reaches an application at all. Add
+`tools/gba-quad-link.sh` as a non-Steam game. Directly connected USB pads work
+from a desktop terminal.
+
+**EmuDeck may reset Dolphin's SI ports.** Its launcher deploys a config with
+every port set to a standard controller, so a GBA (TCP) setting made through
+EmuDeck's Dolphin may not survive the next launch. Starting Dolphin with
+`flatpak run org.DolphinEmu.dolphin-emu` avoids it.
+
+## Packaging
 
 ```sh
-./tools/mock_dolphin.py --players 4 &
-./build/gba-quad-link --players 4 --bios bios/gba_bios.bin --host 127.0.0.1
+./tools/make-appimage.sh
 ```
 
-No ROM or BIOS is included and none ever will be. Put your own in `roms/` and
-`bios/`; both directories are ignored by git.
-
-### Testing controllers
-
-**Controller changes have to be tested in Game Mode**, through
-`tools/gba-quad-link.sh` added to Steam as a non-Steam game. SDL hides Steam
-Input's virtual gamepads from processes it does not believe are Steam games,
-and on SteamOS those virtual pads are how a paired controller reaches an
-application at all. From a desktop terminal you only ever see plain USB pads,
-so a working desktop test proves nothing about the thing people will use.
-
-## How it fits together
-
-Each GBA runs on its own thread and owns its core outright; the host thread
-never touches one. Finished frames are latched into a small locked buffer that
-the host thread copies out and draws at its own rate.
-
-That indirection is the whole design. Dolphin is the timing master — it hands
-out cycle slices over the clock socket and a core runs exactly what it is
-granted, then blocks waiting for more, inside mGBA's SIO driver, for up to half
-a second at a time. The window has to keep drawing through that, and the other
-three cores have to keep running.
-
-### The protocol
-
-Dolphin listens; the GBA clients dial out. Two TCP sockets per GBA — data on
-54970, clock on 49420 — and Dolphin accepts up to four connections on the same
-pair, assigning them to SI slots **in connection order**. In Dolphin, set each
-SI port's device to "GBA (TCP)".
-
-libmgba already implements the GBA end of this, in
-`src/gba/sio/dolphin.c`, so this project wires that driver up rather than
-reimplementing it.
-
-### Four Swords Adventures needs a real BIOS
-
-FSA does not run from a GBA cartridge. It downloads a program to each GBA over
-the JOY bus at the start of play, and that handshake lives in the official GBA
-boot ROM. mGBA's HLE BIOS is a small set of SWI stubs with none of it. So the
-configuration for actual play is a real BIOS dump and **no** ROM — `--no-rom`
-— which leaves each core sitting where a real GBA with an empty slot sits,
-waiting to be handed a program.
-
-## Milestones
-
-- [x] **One core.** A libmgba core in an SDL window, booting a commercial ROM,
-      with controller input and clean audio.
-- [x] **The link.** Clock-driven, against real Dolphin. Pac-Man Vs. multiboots
-      the guest and plays at full speed on both sides.
-- [x] **Four.** The 2x2 compositor with status gutters, per-player controller
-      assignment and the controls menu. Slot ordering verified against the
-      mock; four-way against Dolphin needs Four Swords Adventures.
-- [ ] **Packaging.** AppImage with the static runtime, and a Steam shortcut.
-
-## Notes for anyone reading the code
-
-Three things that look like they should have been copied from a working
-four-GBA app and could not be:
-
-- **Geometry.** Four 240x160 screens tile to 480x320, which is 3:2 and
-  pillarboxes on a 16:9 TV. The side gutters carry per-player link status
-  rather than being blacked out — 150px each at 1080p, 300 at 4K. Below 96px
-  they cannot hold a legible line, so they are dropped and the screens take the
-  space.
-- **Audio rate.** There is no constant to hardcode. A GBA's output rate is
-  whatever the running program's `SOUNDBIAS` resolution field says — 32768 Hz
-  from reset, doubling per step to 262144 Hz, changeable by a register write at
-  any moment. The sound card gets a fixed 48000 Hz and mGBA's resampler absorbs
-  the difference.
-- **Pacing.** A standalone core paces itself to the console refresh. Under
-  Dolphin that inverts and the clock socket drives, so the pacing is a fallback
-  for unlinked cores rather than the normal path — and it must not apply to a
-  linked one. Dolphin blocks the thread it emulates the GameCube on until the
-  GBA answers, so a guest politely sleeping to hold 59.7fps costs the host
-  two thirds of its frame rate. Measured: 22fps, against 59.94 without.
-
-- **Pausing.** The previous project paused every machine while the controls
-  menu was open. That cannot happen here for the same reason: a paused core
-  stops answering and takes the GameCube down with it. Input is withheld
-  instead, which is what the pause was for.
+Bundles the binary and the three libraries a host might have too old. Uses the
+static `type2-runtime`, because appimagetool's default links libfuse2
+dynamically and SteamOS does not ship it.
 
 ## Licence
 
