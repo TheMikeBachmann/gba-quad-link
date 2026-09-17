@@ -138,13 +138,22 @@ void core_thread(const std::string& rom, const std::string& bios,
     }
 
     std::vector<int16_t> sink(4096 * 2);
-    const auto started = std::chrono::steady_clock::now();
     uint64_t frame = 0;
 
-    // Only when nothing else is setting the pace. Linked, Dolphin grants
-    // cycles over the clock socket and the core waits for them inside
-    // run_frame(); pacing here as well would fight it and stall the link.
+    // A ceiling on how fast the core may run, not a target it is held to.
+    //
+    // Unlinked it is the only thing setting the pace. Linked it costs nothing
+    // while Dolphin is healthy, because Dolphin never wants the GBA running
+    // faster than real time and the deadline is always already past. What it
+    // is really for is the link dying: mGBA's driver does not stop when the
+    // far end goes away, it advances the core freely, and without a ceiling
+    // that is a guest running at twenty-odd times speed with the audio queue
+    // overflowing thousands of times a second.
     constexpr double kFrameSeconds = 1.0 / 59.7275;
+    const auto period = std::chrono::duration_cast<
+        std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(kFrameSeconds));
+    auto deadline = std::chrono::steady_clock::now();
 
     while (!g_quit.load(std::memory_order_relaxed)) {
         gba.set_keys(keys->load(std::memory_order_relaxed));
@@ -162,13 +171,23 @@ void core_thread(const std::string& rom, const std::string& bios,
         }
         screen->frames.store(frame, std::memory_order_relaxed);
 
-        if (!linked) {
-            std::this_thread::sleep_until(
-                started + std::chrono::duration_cast<
-                              std::chrono::steady_clock::duration>(
-                              std::chrono::duration<double>(
-                                  kFrameSeconds * frame)));
+        // Noticed here rather than trusted from startup: a link that was up
+        // when we dialled can be gone a minute later, and it does not announce
+        // itself.
+        if (linked && !gba.link_alive()) {
+            linked = false;
+            std::printf("link: Dolphin went away — falling back to "
+                        "self-paced\n");
+            std::fflush(stdout);
         }
+
+        deadline += period;
+        const auto now = std::chrono::steady_clock::now();
+        // Never bank credit. A core Dolphin has been holding below real time
+        // is behind by however long that lasted, and letting it spend that
+        // backlog would have it sprint the moment the link recovers.
+        if (deadline < now) deadline = now;
+        std::this_thread::sleep_until(deadline);
     }
 }
 
@@ -297,6 +316,7 @@ int main(int argc, char** argv) {
                      link, &linked_instance);
 
     auto last_report = std::chrono::steady_clock::now();
+    uint64_t last_frames = 0, draws = 0, last_draws = 0;
     while (!g_quit.load(std::memory_order_relaxed)) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -339,15 +359,31 @@ int main(int argc, char** argv) {
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, nullptr, &dst);
         SDL_RenderPresent(ren);
+        ++draws;
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_report >= std::chrono::seconds(5)) {
-            std::printf("frames: %llu   audio: %llu underruns, %llu drops\n",
-                        (unsigned long long)screen.frames.load(),
+            // Measured, not assumed. This report is printed from the draw
+            // loop, which is paced by vsync — and a compositor throttles the
+            // frame callbacks of a window that is not in front. Dividing by a
+            // nominal five seconds would then quietly understate the core's
+            // speed by however much the host window was being throttled,
+            // which is exactly the effect being measured.
+            const double secs = std::chrono::duration<double>(
+                now - last_report).count();
+            const uint64_t f = screen.frames.load();
+            const uint64_t drawn = draws - last_draws;
+            std::printf("%5.2fs  core %6.2f fps (%3.0f%% of a GBA)   "
+                        "host %5.1f fps   audio: %llu underruns, %llu drops\n",
+                        secs, (f - last_frames) / secs,
+                        100.0 * ((f - last_frames) / secs) / 59.7275,
+                        drawn / secs,
                         (unsigned long long)audio.underruns.load(),
                         (unsigned long long)audio.dropped.load());
             std::fflush(stdout);
             last_report = now;
+            last_frames = f;
+            last_draws = draws;
         }
     }
 

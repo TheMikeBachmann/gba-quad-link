@@ -121,6 +121,15 @@ public:
     // without freeing a descriptor the other thread is still holding.
     void shutdown_link();
 
+    // Whether the far end is still there. Call it from the core's own thread.
+    //
+    // mGBA's driver does not notice a link that has gone away: on end-of-file
+    // its clock read returns nothing, its command read fails, and it falls
+    // through to advancing the core by its own grain with nothing gating it.
+    // A dropped link therefore looks like a core running at twenty times speed
+    // rather than one that has stopped, so it has to be detected out here.
+    bool link_alive() const;
+
 private:
     mCore* core_ = nullptr;
     VFile* rom_vf_ = nullptr;

@@ -18,6 +18,8 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
+#include <cerrno>
+
 #include <cstdarg>
 #include <cstdio>
 
@@ -212,6 +214,19 @@ void GbaInstance::shutdown_link() {
     if (!link_ || !link_->dialled) return;
     for (Socket s : {link_->dol.data, link_->dol.clock})
         if (!SOCKET_FAILED(s)) ::shutdown(s, SHUT_RDWR);
+}
+
+bool GbaInstance::link_alive() const {
+    if (!link_ || !link_->attached) return false;
+    if (SOCKET_FAILED(link_->dol.data)) return false;
+    // Peek rather than read: the driver owns this socket and must still get
+    // every byte. A zero-length result is the peer having closed; EAGAIN just
+    // means nothing is waiting, which is the normal case.
+    char b;
+    const ssize_t n = ::recv(link_->dol.data, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0) return false;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    return true;
 }
 
 bool GbaInstance::linked() const {
