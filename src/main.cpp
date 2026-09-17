@@ -229,10 +229,15 @@ int main(int argc, char** argv) {
     std::string host;               // empty: run unlinked
     std::string rom_dir_arg;        // empty: look in the usual places
     bool cable_all = false;         // every machine on one link cable
+    // Whatever any player presses drives every machine. Walking four guests
+    // through the same menus to reach a link screen is four times the work for
+    // one person, and the menus are identical — but the moment the game asks
+    // the four of them to choose something different, it is the opposite of
+    // what is wanted. So it is a toggle, not a setting.
+    bool mirror_start = false;
     // Four machines that have to be walked through the same menus to reach a
     // link screen is four times the work for one person, and the menus are
     // identical. One input driving all of them gets them there together.
-    bool mirror_input = false;
     bool log_sio = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
@@ -266,7 +271,7 @@ int main(int argc, char** argv) {
         else if (a == "--host") host = next();
         else if (a == "--rom-dir") rom_dir_arg = next();
         else if (a == "--cable") cable_all = true;
-        else if (a == "--mirror-input") mirror_input = true;
+        else if (a == "--mirror-input") mirror_start = true;
         else if (a == "--log-sio") log_sio = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
@@ -527,6 +532,7 @@ int main(int argc, char** argv) {
 
     bool menu_open = false;
     bool setup_open = false;
+    bool mirror_input = mirror_start;
     int capture_player = -1, capture_button = -1;
     std::string status;
 
@@ -662,6 +668,12 @@ int main(int argc, char** argv) {
                 const SDL_Scancode sc = ev.key.keysym.scancode;
                 if (sc == SDL_SCANCODE_F1) { menu_open = !menu_open; status.clear(); }
                 else if (sc == SDL_SCANCODE_F2) { setup_open = !setup_open; status.clear(); }
+                else if (sc == SDL_SCANCODE_F3) {
+                    mirror_input = !mirror_input;
+                    std::printf("mirrored input: %s\n",
+                                mirror_input ? "on" : "off");
+                    std::fflush(stdout);
+                }
                 else if (sc == SDL_SCANCODE_ESCAPE && !menu_open) g_quit.store(true);
             }
         }
@@ -818,6 +830,14 @@ int main(int argc, char** argv) {
                     ImGui::Text("%d cartridges in %s", (int)roms.size(),
                                 rom_dir.c_str());
                 }
+                ImGui::Separator();
+                if (ImGui::Checkbox("Mirror one player's controls to all four "
+                                    "(F3)", &mirror_input)) {}
+                ImGui::TextWrapped(
+                    "For walking every machine through the same menu at once. "
+                    "Turn it off before anyone has to choose something of "
+                    "their own - a character, a kart, a track vote.");
+                ImGui::Separator();
                 if (ImGui::Button("Rescan")) {
                     roms = gql::scan_roms(rom_dir);
                     status = "Found " + std::to_string(roms.size()) + " cartridges";
