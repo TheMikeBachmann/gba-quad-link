@@ -99,6 +99,12 @@ struct Machine {
     // else has none.
     int group_override = -1;
 
+    // Whether this machine is on screen. Hiding one does not stop it: someone
+    // stepping out for ten minutes should come back to their game where they
+    // left it, exactly as they would to a handheld left on the sofa. It only
+    // means the people still playing get the space.
+    bool shown = true;
+
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.
     std::atomic<bool> stop{false};

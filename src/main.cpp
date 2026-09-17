@@ -954,11 +954,22 @@ int main(int argc, char** argv) {
 
         int win_w = 0, win_h = 0;
         SDL_GetRendererOutputSize(ren, &win_w, &win_h);
-        const gql::Layout lay = gql::compute_layout(win_w, win_h, integer_scale);
+        // Who is on screen. Everyone else carries on unseen.
+        int visible[kMaxPlayers];
+        int n_visible = 0;
+        for (int i = 0; i < players; ++i)
+            if (machines[i].shown) visible[n_visible++] = i;
+        if (n_visible == 0) {   // never leave a blank window
+            visible[0] = 0;
+            n_visible = 1;
+        }
+        const gql::Layout lay =
+            gql::compute_layout(win_w, win_h, n_visible, integer_scale);
 
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
-        for (int i = 0; i < players; ++i) {
+        for (int slot = 0; slot < lay.count; ++slot) {
+            const int i = visible[slot];
             {
                 std::lock_guard<std::mutex> lk(machines[i].fb_mutex);
                 if (machines[i].has_frame)
@@ -966,7 +977,7 @@ int main(int argc, char** argv) {
                                       machines[i].pixels.data(),
                                       GbaInstance::kWidth * sizeof(uint32_t));
             }
-            const gql::Rect& r = lay.quadrant[i];
+            const gql::Rect& r = lay.screen[slot];
             SDL_Rect dst{r.x, r.y, r.w, r.h};
             SDL_RenderCopy(ren, textures[i], nullptr, &dst);
         }
@@ -980,10 +991,11 @@ int main(int argc, char** argv) {
             // these are decoration, never interactive, and must not steal
             // focus from the menu when it is open.
             ImDrawList* dl = ImGui::GetBackgroundDrawList();
-            for (int i = 0; i < players; ++i) {
-                const gql::Rect& g = lay.gutter[i % 2];
+            for (int slot = 0; slot < lay.count; ++slot) {
+                const int i = visible[slot];
+                const gql::Rect& g = lay.gutter[slot % 2];
                 const int half = lay.gutter[0].h / 2;
-                const float y = static_cast<float>(g.y + (i / 2) * half);
+                const float y = static_cast<float>(g.y + (slot / 2) * half);
                 const float x = static_cast<float>(g.x) + 8.0f;
                 const LinkState st = machines[i].link.load();
                 ImU32 col = IM_COL32(150, 150, 150, 255);
@@ -1017,8 +1029,11 @@ int main(int argc, char** argv) {
             if (ImGui::BeginTabItem("Games")) {
 
             if (browsing_for < 0 && browsing_dir.empty()) {
-                ImGui::TextUnformatted("What each player is running. "
-                                       "F2 or Select+Start closes this.");
+                ImGui::TextWrapped(
+                    "Tick to show a player on screen. Unticking one does not "
+                    "stop it - the game keeps running, so somebody taking a "
+                    "break comes back to where they left off, and everybody "
+                    "still playing gets a bigger share of the screen.");
                 ImGui::Separator();
                 for (int p = 0; p < players; ++p) {
                     ImGui::PushID(3000 + p);
@@ -1028,8 +1043,22 @@ int main(int argc, char** argv) {
                             : std::filesystem::path(machines[p].rom_path).stem().string();
                     char label[32];
                     std::snprintf(label, sizeof label, "Player %d", p + 1);
+                    // On screen or not. Not running or not — a machine nobody
+                    // is looking at keeps playing, so stepping out for ten
+                    // minutes costs you nothing.
+                    bool shown = machines[p].shown;
+                    if (ImGui::Checkbox("##shown", &shown)) {
+                        machines[p].shown = shown;
+                        int n = 0;
+                        for (int q = 0; q < players; ++q)
+                            if (machines[q].shown) ++n;
+                        status = n <= 1 ? std::string("One screen - full window")
+                               : n == 2 ? std::string("Two screens - split")
+                                        : std::to_string(n) + " screens";
+                    }
+                    ImGui::SameLine();
                     ImGui::TextUnformatted(label);
-                    ImGui::SameLine(80.0f);
+                    ImGui::SameLine(110.0f);
                     if (ImGui::Button(cart.c_str(), ImVec2(330, 0))) {
                         browsing_for = p;
                         rom_filter[0] = '\0';
