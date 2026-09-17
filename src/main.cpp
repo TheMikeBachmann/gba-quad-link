@@ -243,6 +243,11 @@ int main(int argc, char** argv) {
     // Hands each machine a different cartridge in turn while everything runs,
     // which is the one thing the setup screen does that no other test reaches.
     bool self_test_restart = false;
+    // Gives player two player three's cartridge once the others have settled,
+    // which is someone walking up and joining a game already in progress. The
+    // established players must keep their positions on the cable; a newcomer
+    // taking the parent's seat stops everybody.
+    bool self_test_join = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -298,6 +303,7 @@ int main(int argc, char** argv) {
         else if (a == "--mirror-input") mirror_start = true;
         else if (a == "--log-sio") log_sio = true;
         else if (a == "--self-test-restart") self_test_restart = true;
+        else if (a == "--self-test-join") self_test_join = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -385,6 +391,32 @@ int main(int argc, char** argv) {
     Machine machines[kMaxPlayers];
     for (int i = 0; i < kMaxPlayers; ++i) machines[i].index = i;
 
+    // Where a machine should ask to sit on its cable: after everyone already
+    // there.
+    //
+    // Position is not quadrant, and asking for the quadrant is actively
+    // harmful once people are already playing. A cable has one parent, at
+    // position zero, and it is the only machine that starts transfers — so a
+    // newcomer whose quadrant sorts ahead of the existing players takes the
+    // parent's seat from underneath them. The machine that joins is by
+    // definition sitting on a title screen, so the cable then has a parent
+    // that never speaks, and everybody's link stops.
+    //
+    // Joining at the end leaves the established players where they were,
+    // which is also what walking up and plugging into the end of a chain
+    // does. Four machines attaching together at startup still come out in
+    // quadrant order, because they attach in quadrant order.
+    const auto next_slot_in = [&](int group, int self) {
+        int n = 0;
+        for (int j = 0; j < players; ++j) {
+            if (j == self) continue;
+            if (machines[j].mode != gql::LinkMode::Cable) continue;
+            if (machines[j].group != group) continue;
+            if (machines[j].gba.on_cable()) ++n;
+        }
+        return n;
+    };
+
     // Work out which cable each machine belongs on.
     //
     // You link with the people playing your game, so cartridge is the grouping
@@ -401,28 +433,68 @@ int main(int argc, char** argv) {
         int before[kMaxPlayers];
         for (int i = 0; i < players; ++i) before[i] = machines[i].group;
 
+        // What decides who plays with whom: the cartridge, unless a machine
+        // has been told which cable to take.
+        const auto key_of = [&](int i) {
+            return machines[i].group_override >= 0
+                       ? "!override " + std::to_string(machines[i].group_override)
+                       : machines[i].rom_path;
+        };
+
+        // Which cable number each game keeps, decided by where that game is
+        // already being played rather than by whose quadrant comes first.
+        //
+        // This is the whole difficulty. A third person picking up the game two
+        // others are already playing must join *them*; if instead the number
+        // follows the newcomer, the two who changed nothing are recorded as
+        // having moved, get torn off their cable and restarted, and the link
+        // they already had is destroyed by somebody else sitting down. So each
+        // game claims the cable number that the most machines already playing
+        // it are sitting on, and the newcomer is the one who moves.
+        std::vector<std::string> keys;
+        for (int i = 0; i < players; ++i) {
+            const std::string k = key_of(i);
+            if (std::find(keys.begin(), keys.end(), k) == keys.end())
+                keys.push_back(k);
+        }
+
+        struct Claim { std::string key; int want; int weight; };
+        std::vector<Claim> claims;
+        for (const std::string& k : keys) {
+            int tally[gql::kMaxCables] = {};
+            for (int i = 0; i < players; ++i)
+                if (key_of(i) == k && machines[i].group >= 0 &&
+                    machines[i].group < gql::kMaxCables)
+                    ++tally[machines[i].group];
+            int want = 0, weight = -1;
+            for (int g = 0; g < gql::kMaxCables; ++g)
+                if (tally[g] > weight) { weight = tally[g]; want = g; }
+            claims.push_back(Claim{k, want, weight});
+        }
+        // Strongest claim first, so an established group keeps its number and
+        // whoever is joining takes what is left.
+        std::stable_sort(claims.begin(), claims.end(),
+                         [](const Claim& a, const Claim& b) {
+                             return a.weight > b.weight;
+                         });
+
         std::string key_of_group[gql::kMaxCables];
         bool used[gql::kMaxCables] = {};
-
-        // Overrides first, so an explicitly chosen cable keeps its number
-        // whatever the cartridges do.
-        for (int i = 0; i < players; ++i) {
-            const int o = machines[i].group_override;
-            if (o >= 0 && o < gql::kMaxCables) {
-                machines[i].group = o;
-                used[o] = true;
-            }
+        for (const Claim& c : claims) {
+            int g = -1;
+            if (!used[c.want]) g = c.want;
+            else
+                for (int k = 0; k < gql::kMaxCables && g < 0; ++k)
+                    if (!used[k]) g = k;
+            if (g < 0) g = 0;
+            used[g] = true;
+            key_of_group[g] = c.key;
         }
+
         for (int i = 0; i < players; ++i) {
-            if (machines[i].group_override >= 0) continue;
-            const std::string& key = machines[i].rom_path;
-            int found = -1;
+            const std::string key = key_of(i);
             for (int g = 0; g < gql::kMaxCables; ++g)
-                if (used[g] && key_of_group[g] == key) found = g;
-            if (found < 0)
-                for (int g = 0; g < gql::kMaxCables && found < 0; ++g)
-                    if (!used[g]) { found = g; used[g] = true; key_of_group[g] = key; }
-            machines[i].group = found < 0 ? 0 : found;
+                if (used[g] && key_of_group[g] == key) { machines[i].group = g; break; }
         }
 
         for (int i = 0; i < players; ++i)
@@ -592,7 +664,8 @@ int main(int argc, char** argv) {
         // asks for its quadrant rather than being told its position.
         for (int i = 0; i < players; ++i)
             if (machines[i].mode == gql::LinkMode::Cable)
-                machines[i].gba.attach_cable(&cables[machines[i].group], i);
+                machines[i].gba.attach_cable(&cables[machines[i].group],
+                                            next_slot_in(machines[i].group, i));
         std::printf("link cable: %d machines chained\n", on_cable);
         }
     }
@@ -693,7 +766,7 @@ int main(int argc, char** argv) {
         // its own thread is asking for the desynchronization we just spent an
         // afternoon removing.
         if (new_mode == gql::LinkMode::Cable) {
-            m.gba.attach_cable(&cables[m.group], i);
+            m.gba.attach_cable(&cables[m.group], next_slot_in(m.group, i));
             m.link.store(LinkState::Cable);
         } else if (new_mode == gql::LinkMode::Dolphin && !host.empty()) {
             // Dialling and attaching both happen here, while this machine has
@@ -711,7 +784,7 @@ int main(int argc, char** argv) {
                 // Back on the cable, not nowhere, so what the menu says
                 // stays true.
                 m.mode = gql::LinkMode::Cable;
-                m.gba.attach_cable(&cables[m.group], i);
+                m.gba.attach_cable(&cables[m.group], next_slot_in(m.group, i));
                 m.link.store(LinkState::Cable);
                 status = "Player " + std::to_string(i + 1) + ": " + lerr;
             }
@@ -758,7 +831,7 @@ int main(int argc, char** argv) {
 
     auto last_report = std::chrono::steady_clock::now();
     auto next_self_test = std::chrono::steady_clock::now() +
-                          std::chrono::seconds(4);
+                          std::chrono::seconds(8);
     int self_test_at = 0;
     while (!g_quit.load(std::memory_order_relaxed)) {
         if (self_test_restart && self_test_at < players &&
@@ -772,6 +845,14 @@ int main(int argc, char** argv) {
             ++self_test_at;
             next_self_test = std::chrono::steady_clock::now() +
                              std::chrono::seconds(3);
+        }
+        if (self_test_join && self_test_at == 0 &&
+            std::chrono::steady_clock::now() >= next_self_test) {
+            std::printf("self-test: p2 joins p3's game\n");
+            std::fflush(stdout);
+            restart_machine(1, machines[2].rom_path, machines[1].mode);
+            regroup();
+            self_test_at = 1;
         }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
