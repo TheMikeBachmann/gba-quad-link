@@ -70,6 +70,10 @@ struct Machine {
     // Set by the host thread before the core thread starts, read by it after.
     bool dialled = false;
 
+    // Stops this machine alone, so a player can be handed a different
+    // cartridge without the other three being taken down with them.
+    std::atomic<bool> stop{false};
+
     Machine() = default;
     Machine(const Machine&) = delete;
     Machine& operator=(const Machine&) = delete;

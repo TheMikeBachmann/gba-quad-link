@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,6 +39,7 @@
 #include "layout.h"
 #include "machine.h"
 #include "paths.h"
+#include "romlist.h"
 
 namespace {
 
@@ -127,7 +129,8 @@ void machine_thread(Machine* me, AudioOut* audio) {
     auto joybus_mark = std::chrono::steady_clock::time_point{};
     constexpr auto kJoybusHold = std::chrono::milliseconds(750);
 
-    while (!g_quit.load(std::memory_order_relaxed)) {
+    while (!g_quit.load(std::memory_order_relaxed) &&
+           !me->stop.load(std::memory_order_relaxed)) {
         me->gba.set_keys(g_input_held.load(std::memory_order_relaxed)
                              ? 0x03FF
                              : me->keys.load(std::memory_order_relaxed));
@@ -199,6 +202,7 @@ int main(int argc, char** argv) {
     std::string bios_path = "bios/gba_bios.bin";
     std::string cfg_path;
     std::string host;               // empty: run unlinked
+    std::string rom_dir_arg;        // empty: look in the usual places
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -229,6 +233,7 @@ int main(int argc, char** argv) {
         else if (a == "--bios") bios_path = next();
         else if (a == "--controls") cfg_path = next();
         else if (a == "--host") host = next();
+        else if (a == "--rom-dir") rom_dir_arg = next();
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -241,7 +246,7 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P]]...\n"
+                "          [--player N [--rom P]]... [--rom-dir D]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
                 "          [--scale N] [--fullscreen] [--integer-scale]\n"
                 "          [--audio-player 1-4] [--verbose]\n"
@@ -461,8 +466,55 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     bool menu_open = false;
+    bool setup_open = false;
     int capture_player = -1, capture_button = -1;
     std::string status;
+
+    // The cartridge library, scanned once. Nine hundred entries is nothing to
+    // hold in memory and far too slow to re-read every frame.
+    std::string rom_dir = rom_dir_arg.empty() ? gql::default_rom_dir()
+                                              : rom_dir_arg;
+    std::vector<gql::RomEntry> roms = gql::scan_roms(rom_dir);
+    char rom_filter[64] = {0};
+    int browsing_for = -1;   // which player is picking, -1 for nobody
+    if (!roms.empty())
+        std::printf("library: %d cartridges in %s\n", (int)roms.size(),
+                    rom_dir.c_str());
+
+    // Hand one machine a different cartridge, without disturbing the others.
+    // The thread has to go first: the instance belongs to it, and reopening a
+    // core underneath a thread that is running it is not a thing that can be
+    // made safe.
+    const auto restart_machine = [&](int i, const std::string& new_rom) {
+        Machine& m = machines[i];
+        m.stop.store(true);
+        m.gba.shutdown_link();          // in case it is parked in a stall
+        if (m.thread.joinable()) m.thread.join();
+        m.gba.close();
+
+        m.rom_path = new_rom;
+        m.save_path = gql::save_path(new_rom, i);
+        std::string err;
+        if (!m.gba.open(m.rom_path, bios_path, m.save_path, kHostSampleRate,
+                        &err)) {
+            m.booted.store(false);
+            status = "Player " + std::to_string(i + 1) + ": " + err;
+            return;
+        }
+        m.booted.store(true);
+        m.link.store(LinkState::Off);
+        m.dialled = false;
+        // Relinking is deliberately not attempted here. Dolphin hands out SI
+        // slots in the order connections arrive, so a machine that reconnects
+        // on its own would land in whatever slot happened to be next and the
+        // players would swap places mid-game.
+        m.stop.store(false);
+        m.thread = std::thread(machine_thread, &m,
+                               i == audio_player ? &audio : nullptr);
+        status = "Player " + std::to_string(i + 1) + ": " +
+                 (new_rom.empty() ? std::string("BIOS, no cartridge")
+                                  : std::filesystem::path(new_rom).stem().string());
+    };
 
     const auto begin_capture = [&](int p, int b) {
         capture_player = p;
@@ -496,7 +548,11 @@ int main(int argc, char** argv) {
                         SDL_GameControllerFromInstanceID(ev.cbutton.which);
                     if (c && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK)
                           && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START)) {
-                        menu_open = !menu_open;
+                        // One shortcut, both windows: Game Mode has no second
+                        // key to press, and a player who cannot work out
+                        // which one they want can see both.
+                        const bool any = menu_open || setup_open;
+                        menu_open = setup_open = !any;
                         status.clear();
                         continue;
                     }
@@ -542,6 +598,7 @@ int main(int argc, char** argv) {
             if (ev.type == SDL_KEYDOWN) {
                 const SDL_Scancode sc = ev.key.keysym.scancode;
                 if (sc == SDL_SCANCODE_F1) { menu_open = !menu_open; status.clear(); }
+                else if (sc == SDL_SCANCODE_F2) { setup_open = !setup_open; status.clear(); }
                 else if (sc == SDL_SCANCODE_ESCAPE && !menu_open) g_quit.store(true);
             }
         }
@@ -603,6 +660,86 @@ int main(int argc, char** argv) {
                 std::snprintf(line, sizeof line, "%.14s", pn ? pn : "no pad");
                 dl->AddText(ImVec2(x, y + 64), IM_COL32(150, 150, 150, 255), line);
             }
+        }
+
+        if (setup_open) {
+            ImGui::SetNextWindowSize(ImVec2(620, 520), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Setup", nullptr, ImGuiWindowFlags_NoCollapse);
+
+            if (browsing_for < 0) {
+                ImGui::TextUnformatted("What each player is running. "
+                                       "F2 or Select+Start closes this.");
+                ImGui::Separator();
+                for (int p = 0; p < players; ++p) {
+                    ImGui::PushID(3000 + p);
+                    const std::string cart =
+                        machines[p].rom_path.empty()
+                            ? std::string("— no cartridge (waiting for a link) —")
+                            : std::filesystem::path(machines[p].rom_path).stem().string();
+                    char label[32];
+                    std::snprintf(label, sizeof label, "Player %d", p + 1);
+                    ImGui::TextUnformatted(label);
+                    ImGui::SameLine(110.0f);
+                    ImGui::SetNextItemWidth(340.0f);
+                    if (ImGui::Button(cart.c_str(), ImVec2(340, 0))) {
+                        browsing_for = p;
+                        rom_filter[0] = '\0';
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("clear")) restart_machine(p, "");
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                if (roms.empty()) {
+                    ImGui::TextWrapped(
+                        "No cartridges found. Looked in \"%s\". Point "
+                        "--rom-dir at a folder of .gba, .zip or .7z files, or "
+                        "set GQL_ROM_DIR.",
+                        rom_dir.empty() ? "(nowhere)" : rom_dir.c_str());
+                } else {
+                    ImGui::Text("%d cartridges in %s", (int)roms.size(),
+                                rom_dir.c_str());
+                }
+                if (ImGui::Button("Rescan")) {
+                    roms = gql::scan_roms(rom_dir);
+                    status = "Found " + std::to_string(roms.size()) + " cartridges";
+                }
+            } else {
+                ImGui::Text("Cartridge for player %d", browsing_for + 1);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("cancel")) browsing_for = -1;
+                ImGui::Separator();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                // Typing is the only practical way through a library this
+                // size; scrolling nine hundred entries with a stick is not.
+                ImGui::InputTextWithHint("##filter", "type to narrow…",
+                                         rom_filter, sizeof rom_filter);
+                const std::vector<int> hits = gql::filter_roms(roms, rom_filter);
+                ImGui::Text("%d of %d", (int)hits.size(), (int)roms.size());
+                if (ImGui::BeginChild("list", ImVec2(0, 0), true)) {
+                    // Only the visible rows are built: nine hundred buttons a
+                    // frame is a tenth of the frame budget for nothing.
+                    ImGuiListClipper clip;
+                    clip.Begin((int)hits.size());
+                    while (clip.Step()) {
+                        for (int n = clip.DisplayStart; n < clip.DisplayEnd; ++n) {
+                            const gql::RomEntry& e = roms[hits[n]];
+                            ImGui::PushID(n);
+                            if (ImGui::Selectable(e.display.c_str())) {
+                                restart_machine(browsing_for, e.path);
+                                browsing_for = -1;
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                }
+                ImGui::EndChild();
+            }
+            if (!status.empty()) {
+                ImGui::Separator();
+                ImGui::TextUnformatted(status.c_str());
+            }
+            ImGui::End();
         }
 
         if (menu_open) {

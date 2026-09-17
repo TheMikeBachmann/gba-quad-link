@@ -94,6 +94,7 @@ add_executable(gba-quad-link
     src/gba_instance.cpp
     src/layout.cpp
     src/machine.cpp
+    src/romlist.cpp
     src/controls.cpp
     src/paths.cpp)
 target_include_directories(gba-quad-link PRIVATE src)

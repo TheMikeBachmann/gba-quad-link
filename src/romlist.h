@@ -1,0 +1,42 @@
+/* Copyright (c) 2026 Mike Bachmann
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// romlist.h — the cartridges a player can choose from.
+//
+// A real library is a directory of archives with names like
+// "Advance Wars (USA) (Rev 1).7z", nine hundred of them, and someone picking
+// one from a sofa with a controller is not going to scroll. So the list is
+// scanned once, sorted, and filtered by typing.
+
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace gql {
+
+struct RomEntry {
+    std::string path;      // what to hand to GbaInstance::open
+    std::string display;   // the file name without extension or directory
+};
+
+// Everything in `dir` that might be a cartridge, sorted by display name.
+// Recognises .gba and the archive formats mGBA can see inside; whether an
+// archive actually holds a ROM is not known until it is opened, which is too
+// slow to do for a whole library up front.
+std::vector<RomEntry> scan_roms(const std::string& dir);
+
+// Indices of the entries matching `needle`, which matches case-insensitively
+// and on any part of the name. An empty needle matches everything.
+std::vector<int> filter_roms(const std::vector<RomEntry>& roms,
+                             const std::string& needle);
+
+// Where to look when the user has not said. The first of these that exists and
+// holds something: $GQL_ROM_DIR, a "roms" directory beside the executable or
+// the AppImage, $XDG_DATA_HOME/gba-quad-link/roms, ~/roms.
+std::string default_rom_dir();
+
+}  // namespace gql
