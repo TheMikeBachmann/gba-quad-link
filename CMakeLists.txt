@@ -103,6 +103,7 @@ add_executable(gba-quad-link
     src/ap_connector.cpp
     src/ap_patch.cpp
     src/ap_session.cpp
+    src/ap_worlds.cpp
     src/cable.cpp
     src/controls.cpp
     src/paths.cpp)

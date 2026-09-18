@@ -37,6 +37,12 @@ struct ApPatch {
 // Reads the manifest out of a patch file. False if it is not one.
 bool read_ap_patch(const std::string& path, ApPatch* out);
 
+// One member out of a zip. Patch files and .apworlds are both zips, so this is
+// shared rather than written twice.
+bool zip_read(const std::string& archive, const std::string& member,
+              std::string* out);
+std::vector<std::string> zip_list(const std::string& archive);
+
 // Lowercase hex md5 of a file, or empty if it cannot be read.
 std::string md5_of_file(const std::string& path);
 

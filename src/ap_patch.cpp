@@ -49,8 +49,9 @@ std::uint32_t rd32(const std::uint8_t* p) {
 // are small, written by one program, and we want exactly one member out of
 // them. Central directory only — the local headers lie about sizes when a data
 // descriptor is used, and the central directory never does.
-bool zip_extract(const std::string& path, const std::string& member,
-                 std::string* out) {
+// When `member` is empty, every name is appended to `names` instead.
+bool zip_walk(const std::string& path, const std::string& member,
+              std::string* out, std::vector<std::string>* names) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     f.seekg(0, std::ios::end);
@@ -94,6 +95,7 @@ bool zip_extract(const std::string& path, const std::string& member,
         const std::string name(reinterpret_cast<const char*>(c + at + 46), name_len);
         at += 46u + name_len + extra_len + cmt_len;
 
+        if (names) { names->push_back(name); continue; }
         if (name != member) continue;
         // Refuse anything absurd rather than allocating it.
         if (usize > (64u << 20) || csize > (64u << 20)) return false;
@@ -125,7 +127,7 @@ bool zip_extract(const std::string& path, const std::string& member,
         inflateEnd(&z);
         return r == Z_STREAM_END;
     }
-    return false;
+    return names != nullptr;
 }
 
 // Words in a name, lowercased, punctuation dropped. "Pokemon - Emerald
@@ -199,6 +201,17 @@ bool looks_like_rom(const fs::path& p) {
 
 }  // namespace
 
+bool zip_read(const std::string& archive, const std::string& member,
+              std::string* out) {
+    return zip_walk(archive, member, out, nullptr);
+}
+
+std::vector<std::string> zip_list(const std::string& archive) {
+    std::vector<std::string> names;
+    zip_walk(archive, {}, nullptr, &names);
+    return names;
+}
+
 std::string md5_of_file(const std::string& path) {
     VFile* vf = VFileOpen(path.c_str(), O_RDONLY);
     if (!vf) return {};
@@ -210,7 +223,7 @@ std::string md5_of_file(const std::string& path) {
 
 bool read_ap_patch(const std::string& path, ApPatch* out) {
     std::string manifest;
-    if (!zip_extract(path, "archipelago.json", &manifest)) return false;
+    if (!zip_walk(path, "archipelago.json", &manifest, nullptr)) return false;
 
     json::Value v;
     if (!json::parse(manifest, &v) || v.type != json::Value::Type::Object)
