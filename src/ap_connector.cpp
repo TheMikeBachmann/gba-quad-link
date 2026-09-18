@@ -118,6 +118,11 @@ std::string ApConnector::message() const {
     return message_;
 }
 
+std::string ApConnector::fault() const {
+    std::lock_guard<std::mutex> lk(message_mutex_);
+    return fault_;
+}
+
 void ApConnector::run() {
     while (!quit_.load(std::memory_order_relaxed)) {
         const int listen_fd = fd_.load(std::memory_order_relaxed);
@@ -219,6 +224,23 @@ void ApConnector::serve(GbaInstance& gba) {
     if (!pending_) return;
     const json::Value& req = *pending_;
 
+    // A domain this build does not implement is a gap here, not a fault in
+    // the game, and it is worth saying so in both directions: the client logs
+    // the reply, and the menu shows the first one that happened. Without this
+    // the only symptom is a slot that connects and then never does anything.
+    const auto unsupported = [this](const std::string& domain) {
+        const std::string what =
+            "this build has no \"" + domain + "\" memory domain (it provides " +
+            GbaInstance::known_domains() + ")";
+        std::lock_guard<std::mutex> mk(message_mutex_);
+        if (fault_.empty()) {
+            fault_ = what;
+            std::printf("p%d archipelago: %s\n", player_ + 1, what.c_str());
+            std::fflush(stdout);
+        }
+        return error(what);
+    };
+
     json::Array out;
     out.reserve(req.array.size());
 
@@ -257,6 +279,10 @@ void ApConnector::serve(GbaInstance& gba) {
             continue;
         }
         if (type == "MEMORY_SIZE") {
+            if (!GbaInstance::known_domain(r.str("domain"))) {
+                out.push_back(unsupported(r.str("domain")));
+                continue;
+            }
             json::Object o;
             o["type"] = json::Value::of(std::string("MEMORY_SIZE_RESPONSE"));
             o["value"] = json::Value::of(
@@ -285,6 +311,14 @@ void ApConnector::serve(GbaInstance& gba) {
         }
 
         if (type == "GUARD") {
+            if (!GbaInstance::known_domain(r.str("domain"))) {
+                // Not reported as a guard that failed to match: that is an
+                // ordinary result the client handles quietly, and it would
+                // bury the gap.
+                out.push_back(unsupported(r.str("domain")));
+                guard_failed = true;
+                continue;
+            }
             std::vector<std::uint8_t> want;
             bool matched = false;
             if (base64::decode(r.str("expected_data"), &want) && !want.empty()) {
@@ -304,13 +338,17 @@ void ApConnector::serve(GbaInstance& gba) {
 
         if (type == "READ") {
             if (guard_failed) { out.push_back(typed("READ_RESPONSE")); continue; }
+            if (!GbaInstance::known_domain(r.str("domain"))) {
+                out.push_back(unsupported(r.str("domain")));
+                continue;
+            }
             const auto size = static_cast<std::size_t>(r.integer("size"));
             std::vector<std::uint8_t> got(size);
             if (size == 0 ||
                 !gba.read_memory(r.str("domain"),
                                  static_cast<std::uint32_t>(r.integer("address")),
                                  got.data(), size)) {
-                out.push_back(error("Failed to read " + r.str("domain")));
+                out.push_back(error("Address out of range in " + r.str("domain")));
                 continue;
             }
             json::Object o;
@@ -322,6 +360,10 @@ void ApConnector::serve(GbaInstance& gba) {
 
         if (type == "WRITE") {
             if (guard_failed) { out.push_back(typed("WRITE_RESPONSE")); continue; }
+            if (!GbaInstance::known_domain(r.str("domain"))) {
+                out.push_back(unsupported(r.str("domain")));
+                continue;
+            }
             std::vector<std::uint8_t> data;
             if (!base64::decode(r.str("value"), &data)) {
                 out.push_back(error("Bad value"));
@@ -331,7 +373,7 @@ void ApConnector::serve(GbaInstance& gba) {
                 !gba.write_memory(r.str("domain"),
                                   static_cast<std::uint32_t>(r.integer("address")),
                                   data.data(), data.size())) {
-                out.push_back(error("Failed to write " + r.str("domain")));
+                out.push_back(error("Refused write to " + r.str("domain")));
                 continue;
             }
             out.push_back(typed("WRITE_RESPONSE"));

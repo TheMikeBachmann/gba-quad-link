@@ -123,6 +123,15 @@ public:
     // them through untouched: "System Bus", "ROM", "EWRAM", "IWRAM",
     // "Save RAM", "Combined WRAM". Anything else is refused rather than
     // guessed at.
+    // Whether this is a memory domain this build implements at all, as
+    // distinct from one that exists but is currently empty. Worth separating:
+    // a world asking for a region nobody has needed yet is a gap to fill, and
+    // it should not look like a game misbehaving.
+    static bool known_domain(const std::string& domain);
+
+    // The domains above, for saying in an error message what is on offer.
+    static std::string known_domains();
+
     std::size_t memory_size(const std::string& domain) const;
     bool read_memory(const std::string& domain, std::uint32_t address,
                      std::uint8_t* out, std::size_t size) const;

@@ -484,6 +484,26 @@ Region region_for(struct GBA* gba, const std::string& domain) {
 
 }  // namespace
 
+// One list, so the check and the message it produces cannot drift apart.
+static const char* const kDomains[] = {
+    "EWRAM", "IWRAM", "ROM", "Save RAM", "System Bus",
+};
+
+bool GbaInstance::known_domain(const std::string& domain) {
+    for (const char* d : kDomains)
+        if (domain == d) return true;
+    return false;
+}
+
+std::string GbaInstance::known_domains() {
+    std::string out;
+    for (const char* d : kDomains) {
+        if (!out.empty()) out += ", ";
+        out += d;
+    }
+    return out;
+}
+
 std::size_t GbaInstance::memory_size(const std::string& domain) const {
     if (!core_) return 0;
     struct GBA* gba = static_cast<struct GBA*>(core_->board);

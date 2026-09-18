@@ -1657,9 +1657,17 @@ int main(int argc, char** argv) {
 
                             const bool attached = machines[p].ap.client_connected();
                             const bool listening = machines[p].ap.listening();
+                            const std::string fault = machines[p].ap.fault();
                             if (stage == Machine::ApStage::Failed) {
                                 ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
                                                    "%s", note.c_str());
+                            } else if (!fault.empty()) {
+                                // Takes precedence over "attached", which is
+                                // true and beside the point: the client is
+                                // connected and getting nowhere, and this says
+                                // why.
+                                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
+                                                   "%s", fault.c_str());
                             } else if (attached) {
                                 ImGui::TextColored(ImVec4(0.6f, 0.95f, 0.65f, 1.0f),
                                                    "attached on port %d",

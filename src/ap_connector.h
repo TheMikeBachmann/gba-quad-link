@@ -71,6 +71,13 @@ public:
     // The last thing a game client asked to be shown, for the status gutter.
     std::string message() const;
 
+    // Set when a request could not be served for a reason that is this
+    // program's gap rather than the game's fault — a memory region no world
+    // has needed until now. Sticky, because the client retries and the first
+    // occurrence is the informative one, and because the symptom otherwise is
+    // a slot that simply never progresses.
+    std::string fault() const;
+
 private:
     void run();                                   // socket thread
     std::string handle(const std::string& line);  // one request line
@@ -94,6 +101,7 @@ private:
     std::atomic<long long> lock_deadline_ms_{0};
     mutable std::mutex message_mutex_;
     std::string message_;
+    std::string fault_;
 };
 
 }  // namespace gql
