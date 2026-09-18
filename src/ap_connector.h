@@ -65,6 +65,7 @@ public:
     std::string message() const;
 
 private:
+    bool reopen();                                // re-listen after a client goes
     void run();                                   // socket thread
     std::string handle(const std::string& line);  // one request line
 

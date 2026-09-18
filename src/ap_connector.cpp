@@ -60,6 +60,25 @@ json::Value typed(const char* type) {
 
 ApConnector::~ApConnector() { close(); }
 
+bool ApConnector::reopen() {
+    if (fd_ >= 0) return true;
+    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd_ < 0) return false;
+    const int yes = 1;
+    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port_));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
+        ::listen(fd_, 1) != 0) {
+        ::close(fd_);
+        fd_ = -1;
+        return false;
+    }
+    return true;
+}
+
 bool ApConnector::open(int port, int player) {
     close();
     port_ = port;
@@ -118,6 +137,10 @@ std::string ApConnector::message() const {
 
 void ApConnector::run() {
     while (!quit_.load(std::memory_order_relaxed)) {
+        if (fd_ < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
         pollfd p{fd_, POLLIN, 0};
         if (::poll(&p, 1, 200) <= 0) continue;
 
@@ -126,6 +149,18 @@ void ApConnector::run() {
         const int yes = 1;
         ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
         client_.store(c);
+
+        // Stop listening while somebody is attached.
+        //
+        // A game client finds its emulator by walking ports 43055 upwards and
+        // taking the first that answers, so with four of them looking and the
+        // listener left open, the second client's connection is accepted by
+        // the kernel into the backlog, never picked up by us, and times out —
+        // instead of being refused and moving on to the next port. Refusing is
+        // what makes four clients sort themselves across four machines.
+        ::close(fd_);
+        fd_ = -1;
+
         std::printf("p%d archipelago: client connected on port %d\n",
                     player_ + 1, port_);
         std::fflush(stdout);
@@ -155,6 +190,11 @@ void ApConnector::run() {
         lock_requested_.store(false);
         std::printf("p%d archipelago: client disconnected\n", player_ + 1);
         std::fflush(stdout);
+
+        // Take the port back so another client can find this machine.
+        if (!quit_.load(std::memory_order_relaxed) && !reopen())
+            std::printf("p%d archipelago: could not listen on %d again\n",
+                        player_ + 1, port_);
     }
 }
 
