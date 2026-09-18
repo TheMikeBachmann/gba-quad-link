@@ -8,8 +8,15 @@
 //
 // Archipelago's GBA games do not talk to an emulator; they talk to a connector
 // socket, scanning 127.0.0.1 ports 43055 upwards for one that answers. Five
-// ports, four machines — so each quadrant listens on its own and four game
+// ports, four machines — so each quadrant has a port of its own and four game
 // clients attach to four guests without any of them knowing the others exist.
+//
+// Which is why a connector never opens or reclaims its own port. Nothing in
+// that scan tells a client which player it belongs to; it simply takes the
+// lowest port that answers. Two connectors listening at the same time is
+// therefore a race between two clients for the lower one, so the decision to
+// listen belongs to whoever can see all four machines, and is made one at a
+// time. See the coordinator in main.cpp.
 //
 // Threading follows the rule the rest of the program runs on: a core belongs
 // to the thread driving it. The socket lives on its own thread and never
@@ -52,7 +59,7 @@ public:
     // whatever the socket thread has parked, or returns immediately.
     void serve(GbaInstance& gba);
 
-    bool listening() const { return fd_ >= 0; }
+    bool listening() const { return fd_.load(std::memory_order_relaxed) >= 0; }
     bool client_connected() const { return client_.load(std::memory_order_relaxed) >= 0; }
     int port() const { return port_; }
 
@@ -65,13 +72,12 @@ public:
     std::string message() const;
 
 private:
-    bool reopen();                                // re-listen after a client goes
     void run();                                   // socket thread
     std::string handle(const std::string& line);  // one request line
 
     int port_ = 0;
     int player_ = 0;
-    int fd_ = -1;                       // listening socket
+    std::atomic<int> fd_{-1};           // listening socket, -1 when not listening
     std::atomic<int> client_{-1};       // accepted socket, -1 when none
     std::atomic<bool> quit_{false};
     std::thread thread_;

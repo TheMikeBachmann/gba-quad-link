@@ -60,34 +60,15 @@ json::Value typed(const char* type) {
 
 ApConnector::~ApConnector() { close(); }
 
-bool ApConnector::reopen() {
-    if (fd_ >= 0) return true;
-    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd_ < 0) return false;
-    const int yes = 1;
-    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port_));
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::listen(fd_, 1) != 0) {
-        ::close(fd_);
-        fd_ = -1;
-        return false;
-    }
-    return true;
-}
-
 bool ApConnector::open(int port, int player) {
     close();
     port_ = port;
     player_ = player;
 
-    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd_ < 0) return false;
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
     const int yes = 1;
-    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -95,12 +76,12 @@ bool ApConnector::open(int port, int player) {
     // Loopback only. This hands out read and write access to a running game's
     // memory; it has no business being reachable from anywhere else.
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::listen(fd_, 1) != 0) {
-        ::close(fd_);
-        fd_ = -1;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
+        ::listen(fd, 1) != 0) {
+        ::close(fd);
         return false;
     }
+    fd_.store(fd);
 
     quit_.store(false);
     thread_ = std::thread(&ApConnector::run, this);
@@ -111,7 +92,8 @@ void ApConnector::close() {
     quit_.store(true);
     // Shut the sockets down rather than only closing them, so a thread parked
     // in accept() or recv() comes back instead of being joined forever.
-    if (fd_ >= 0) ::shutdown(fd_, SHUT_RDWR);
+    const int listen_fd = fd_.load();
+    if (listen_fd >= 0) ::shutdown(listen_fd, SHUT_RDWR);
     const int c = client_.exchange(-1);
     if (c >= 0) ::shutdown(c, SHUT_RDWR);
     {
@@ -121,7 +103,8 @@ void ApConnector::close() {
     }
     cv_.notify_all();
     if (thread_.joinable()) thread_.join();
-    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    const int left = fd_.exchange(-1);
+    if (left >= 0) ::close(left);
     if (c >= 0) ::close(c);
 }
 
@@ -137,14 +120,15 @@ std::string ApConnector::message() const {
 
 void ApConnector::run() {
     while (!quit_.load(std::memory_order_relaxed)) {
-        if (fd_ < 0) {
+        const int listen_fd = fd_.load(std::memory_order_relaxed);
+        if (listen_fd < 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
-        pollfd p{fd_, POLLIN, 0};
+        pollfd p{listen_fd, POLLIN, 0};
         if (::poll(&p, 1, 200) <= 0) continue;
 
-        const int c = ::accept(fd_, nullptr, nullptr);
+        const int c = ::accept(listen_fd, nullptr, nullptr);
         if (c < 0) continue;
         const int yes = 1;
         ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
@@ -158,8 +142,8 @@ void ApConnector::run() {
         // the kernel into the backlog, never picked up by us, and times out —
         // instead of being refused and moving on to the next port. Refusing is
         // what makes four clients sort themselves across four machines.
-        ::close(fd_);
-        fd_ = -1;
+        ::close(listen_fd);
+        fd_.store(-1);
 
         std::printf("p%d archipelago: client connected on port %d\n",
                     player_ + 1, port_);
@@ -191,10 +175,13 @@ void ApConnector::run() {
         std::printf("p%d archipelago: client disconnected\n", player_ + 1);
         std::fflush(stdout);
 
-        // Take the port back so another client can find this machine.
-        if (!quit_.load(std::memory_order_relaxed) && !reopen())
-            std::printf("p%d archipelago: could not listen on %d again\n",
-                        player_ + 1, port_);
+        // The port is deliberately not reclaimed here.
+        //
+        // Whether this machine should be listening again is a question about
+        // all four machines at once, because only one may listen at a time,
+        // and this thread can only see one. So it ends, leaving the connector
+        // quiet until whoever can see all four opens it again.
+        return;
     }
 }
 

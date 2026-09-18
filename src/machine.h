@@ -131,6 +131,14 @@ struct Machine {
     std::string ap_rom;           // the patched cartridge, once there is one
     std::atomic<bool> ap_rom_ready{false};
 
+    // Whether this machine is waiting for a game client to attach to it, and
+    // when its listener was opened. Only one machine may listen at a time —
+    // see the coordinator in main.cpp — so this is a place in a queue rather
+    // than a socket, and the timestamp is only there to tell a client that is
+    // taking a while from one that is never coming.
+    bool ap_wants_client = false;
+    long long ap_listen_since_ms = 0;
+
     static const char* stage_name(ApStage s);
 
     void set_ap_note(const std::string& n) {

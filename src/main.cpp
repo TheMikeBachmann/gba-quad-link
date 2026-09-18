@@ -676,16 +676,11 @@ int main(int argc, char** argv) {
     }
 
     if (archipelago) {
-        for (int i = 0; i < players && i < gql::kApPortCount; ++i) {
-            const int port = gql::kApPortFirst + i;
-            if (machines[i].ap.open(port, i))
-                std::printf("p%d archipelago: listening on 127.0.0.1:%d\n",
-                            i + 1, port);
-            else
-                std::printf("p%d archipelago: port %d is taken - is BizHawk "
-                            "running?\n", i + 1, port);
-        }
-        std::fflush(stdout);
+        // Every machine wants a client. Which one is actually listening at any
+        // moment is decided in the main loop, one at a time; see there for
+        // why they cannot all listen at once.
+        for (int i = 0; i < players && i < gql::kApPortCount; ++i)
+            machines[i].ap_wants_client = true;
     }
 
     for (int i = 0; i < players; ++i) {
@@ -779,11 +774,25 @@ int main(int argc, char** argv) {
     // cartridge a patch wants has never been hashed, every archive in the
     // library has to be opened to find it. Nothing here touches a core; it
     // ends by leaving a path where the host thread will find it.
-    const auto begin_archipelago = [&](int i, const std::string& patch_path) {
+    // Drops a player out of Archipelago entirely: kills their client, gives
+    // up their port, and takes them out of the queue for one. Also how a
+    // client that has hung is got rid of, since it would otherwise hold the
+    // listener against everybody behind it.
+    const auto clear_archipelago = [&](int i) {
         Machine& m = machines[i];
         if (m.ap_thread.joinable()) m.ap_thread.join();
         m.ap_session.stop();
+        m.ap_wants_client = false;
+        m.ap.close();
         m.ap_rom_ready.store(false);
+        m.ap_patch_path.clear();
+        m.ap_stage.store(Machine::ApStage::Idle);
+        m.set_ap_note("");
+    };
+
+    const auto begin_archipelago = [&](int i, const std::string& patch_path) {
+        Machine& m = machines[i];
+        clear_archipelago(i);
         m.ap_patch_path = patch_path;
         m.ap_stage.store(Machine::ApStage::Searching);
         m.set_ap_note("reading patch");
@@ -1082,15 +1091,66 @@ int main(int argc, char** argv) {
             if (rom.empty()) continue;
             restart_machine(i, rom, machines[i].mode);
             regroup();
-            if (!machines[i].ap.listening() && !machines[i].ap.client_connected()) {
-                const int port = gql::kApPortFirst + i;
-                if (!machines[i].ap.open(port, i))
-                    machines[i].set_ap_note("port " + std::to_string(port) +
-                                            " is taken");
-            }
+            machines[i].ap_wants_client = true;
             status = "Player " + std::to_string(i + 1) + ": " +
                      machines[i].ap_patch.player_name + " (" +
                      machines[i].ap_patch.game + ")";
+        }
+
+        // Exactly one Archipelago listener is open at a time.
+        //
+        // A game client finds its emulator by walking ports 43055 upwards and
+        // taking the first that answers. Nothing in that exchange says which
+        // player a client belongs to, so two listeners open at once is a race
+        // between two clients for the lower port. Losing that race is not
+        // loud: a client that lands on the wrong quadrant finds a cartridge
+        // running the same game it expected, validates against it happily,
+        // and from then on sends one player's items to another. Handing the
+        // port out to one machine at a time, in player order, turns the race
+        // into an ordering.
+        {
+            const long long now_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            int waiting = -1;
+            for (int i = 0; i < players; ++i)
+                if (machines[i].ap.listening()) { waiting = i; break; }
+
+            if (waiting < 0) {
+                for (int i = 0; i < players; ++i) {
+                    Machine& m = machines[i];
+                    if (!m.ap_wants_client || m.ap.client_connected()) continue;
+                    // A client that has died is not coming, and must not hold
+                    // the port shut against the players whose clients live.
+                    // Nothing checks this when the client is somebody else's,
+                    // which is what --archipelago means.
+                    if (!archipelago && !m.ap_session.running()) continue;
+                    const int port = gql::kApPortFirst + i;
+                    if (m.ap.open(port, i)) {
+                        m.ap_listen_since_ms = now_ms;
+                        std::printf("p%d archipelago: listening on "
+                                    "127.0.0.1:%d\n", i + 1, port);
+                    } else {
+                        m.ap_wants_client = false;
+                        m.set_ap_note("port " + std::to_string(port) +
+                                      " is taken - is BizHawk running?");
+                    }
+                    std::fflush(stdout);
+                    break;
+                }
+            } else if (now_ms - machines[waiting].ap_listen_since_ms > 20000 &&
+                       machines[waiting].ap_stage.load() ==
+                           Machine::ApStage::Ready) {
+                // The head of the queue holds the port, so a client that never
+                // arrives stops the other three getting theirs. Say so, rather
+                // than moving on: giving the port to the next player would let
+                // a slow client attach to the wrong quadrant later, which is
+                // the failure this whole arrangement exists to prevent.
+                machines[waiting].set_ap_note(
+                    "waiting for this client to attach - clear the slot to let "
+                    "the others through");
+            }
         }
 
         const Uint8* ks = SDL_GetKeyboardState(nullptr);
@@ -1592,12 +1652,30 @@ int main(int argc, char** argv) {
                         // player's row lands beside this one.
                         if (stage != Machine::ApStage::Idle) {
                             ImGui::SameLine();
-                            if (stage == Machine::ApStage::Failed)
+                            if (ImGui::Button("Clear")) clear_archipelago(p);
+                            ImGui::SameLine();
+
+                            const bool attached = machines[p].ap.client_connected();
+                            const bool listening = machines[p].ap.listening();
+                            if (stage == Machine::ApStage::Failed) {
                                 ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
                                                    "%s", note.c_str());
-                            else
+                            } else if (attached) {
+                                ImGui::TextColored(ImVec4(0.6f, 0.95f, 0.65f, 1.0f),
+                                                   "attached on port %d",
+                                                   machines[p].ap.port());
+                            } else if (listening) {
+                                ImGui::TextDisabled("%s", note.empty()
+                                    ? "waiting for its client" : note.c_str());
+                            } else if (machines[p].ap_wants_client) {
+                                // Ports are handed out one at a time, so this
+                                // player is behind somebody. Worth saying, or
+                                // a slot that is merely queued looks stuck.
+                                ImGui::TextDisabled("waiting for a free port");
+                            } else {
                                 ImGui::TextDisabled("%s", note.empty()
                                     ? Machine::stage_name(stage) : note.c_str());
+                            }
                         }
                         ImGui::PopID();
                     }
