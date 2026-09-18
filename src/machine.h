@@ -22,6 +22,9 @@
 #include <thread>
 #include <vector>
 
+#include "ap_connector.h"
+#include "ap_patch.h"
+#include "ap_session.h"
 #include "gba_instance.h"
 
 namespace gql {
@@ -104,6 +107,48 @@ struct Machine {
     // left it, exactly as they would to a handheld left on the sofa. It only
     // means the people still playing get the space.
     bool shown = true;
+
+    // Asking the machine to read something out of its own core, since only
+    // its own thread may.
+    std::atomic<bool> want_title{false};
+    std::string title;
+    bool have_title = false;
+
+    // This machine's end of an Archipelago game client, when one is wanted.
+    ApConnector ap;
+
+    // Getting a player from "I picked a patch file" to "I am playing" takes a
+    // library search that can run for two minutes, so it happens on a thread
+    // of its own and reports back through these.
+    enum class ApStage { Idle, Searching, Configuring, Starting, Ready, Failed };
+    std::atomic<ApStage> ap_stage{ApStage::Idle};
+    std::thread ap_thread;
+    ApSession ap_session;
+    ApPatch ap_patch;
+    std::string ap_patch_path;
+    mutable std::mutex ap_mutex;
+    std::string ap_note;          // what it is doing, or what went wrong
+    std::string ap_rom;           // the patched cartridge, once there is one
+    std::atomic<bool> ap_rom_ready{false};
+
+    // Whether this machine is waiting for a game client to attach to it, and
+    // when its listener was opened. Only one machine may listen at a time —
+    // see the coordinator in main.cpp — so this is a place in a queue rather
+    // than a socket, and the timestamp is only there to tell a client that is
+    // taking a while from one that is never coming.
+    bool ap_wants_client = false;
+    long long ap_listen_since_ms = 0;
+
+    static const char* stage_name(ApStage s);
+
+    void set_ap_note(const std::string& n) {
+        std::lock_guard<std::mutex> lk(ap_mutex);
+        ap_note = n;
+    }
+    std::string get_ap_note() const {
+        std::lock_guard<std::mutex> lk(ap_mutex);
+        return ap_note;
+    }
 
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.

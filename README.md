@@ -21,6 +21,7 @@ generally useful than that.
 | Four to a GameCube | Four Swords Adventures. All four multiboot from Dolphin over TCP. |
 | One to a GameCube | Pac-Man Vs., the Tingle Tuner, Metroid Prime's Fusion link. |
 | Any mix of the above | Two on a cable, one on the GameCube, one playing alone. |
+| Four Archipelago slots | Point a quadrant at a patch file; the randomiser client is run for you. |
 
 Verified against real Dolphin and real games, not just in theory: Four Swords
 Adventures multiboots all four quadrants and runs at 59.94fps on both sides;
@@ -104,6 +105,108 @@ commands, and on request a stall with the sockets left open. Enough to develop
 the link against; it cannot multiboot, so it can only ever prove our end
 behaves.
 
+## Archipelago
+
+Four people in the same multiworld, on one screen, without anybody opening a
+terminal. Point a quadrant at a patch file and everything else happens on its
+own: the base cartridge is found, the randomiser client is started hidden, and
+the patched game boots in that quadrant.
+
+### What you have to do
+
+Three things, once each.
+
+**1. Install Archipelago.** The Linux AppImage is fine — unpack it with
+`--appimage-extract` and put it anywhere below one of:
+
+```
+$GQL_AP_DIR
+~/.local/share/gba-quad-link/archipelago
+~/Archipelago
+~/Applications/Archipelago
+./Archipelago
+```
+
+It is found by looking for `ArchipelagoBizHawkClient`, including one level down
+in `squashfs-root/opt/Archipelago`, so an unpacked AppImage works as it lands.
+The Archipelago tab says which copy it found.
+
+**2. Own the base cartridge.** Put it in your ROM library folder (set on the
+Games tab). It is found by checksum, so the filename does not matter, and it may
+be inside a `.zip` or `.7z`. Some worlds accept more than one acceptable dump —
+Castlevania: Circle of the Moon names two — and any of them will do.
+
+**3. Get a patch file.** Either download your slot's patch from the room page,
+or generate a seed locally with `ArchipelagoGenerate`. Patches default to
+`~/.local/share/gba-quad-link/patches`, and the picker can browse anywhere.
+
+Patches can also be named up front, which is useful for a Steam shortcut that
+always starts the same multiworld:
+
+```sh
+gba-quad-link --players 4 --ap-server localhost:38281 \
+  --player 1 --patch seed_P1_Borf.apemerald \
+  --player 2 --patch seed_P2_Vega.apemerald \
+  --player 3 --patch seed_P3_Ridley.apmzm \
+  --player 4 --patch seed_P4_Samus.apmzm
+```
+
+### What happens by itself
+
+Once you choose a patch for a player, in order:
+
+1. The patch's `archipelago.json` manifest is read — game, slot name, server
+   address, and the checksum of the cartridge it expects.
+2. Your library is searched for that checksum, looking inside archives, with
+   cartridges whose names resemble the game tried first. Anything extracted is
+   cached, so this is slow at most once.
+3. The Archipelago world for that game is located and its cartridge path is
+   written into `host.yaml`, which is the setting the client would otherwise
+   open a file dialog to ask you for.
+4. The client is started hidden, one per player, and told where to connect by
+   writing to its standard input.
+5. The patched cartridge it produces is booted in that quadrant, and that
+   quadrant starts answering the connector socket the client is looking for.
+
+A patch generated locally carries no server address; put one in the **Server**
+box on the Archipelago tab and it is used for every slot. A patch downloaded
+from a room carries its own, and the box is ignored.
+
+Four slots at once is tested, not assumed: four clients, two games, all four
+joining the same multiworld from one window.
+
+While you are playing, each quadrant's status column shows its Archipelago
+slot name and the last item that went out or came in — the menu is the one
+place nobody is looking mid-game, and a client that has quietly stopped is
+otherwise invisible.
+
+Each player's client output appears on the tab, interleaved in the order things
+actually happened, which is the only useful way to read four connections at
+once. **Clear** drops a player out of Archipelago entirely and kills their
+client.
+
+### Games Archipelago does not officially support
+
+These work the same way, because nothing here knows the name of any game. All
+the game-specific knowledge — which addresses hold what, how a check is
+detected — lives in the world, inside the Archipelago client process. This
+program only implements the generic connector protocol that every GBA world
+talks: read, write, guard, lock, and a handful of identifying requests.
+
+So a community world is installed the way Archipelago installs any world — drop
+its `.apworld` into `custom_worlds/` — and then it is just another patch file.
+*Metroid: Zero Mission* was added this way and needed no changes here.
+
+The one thing that can be missing is a memory region no world has needed yet.
+This build provides `EWRAM`, `IWRAM`, `ROM`, `Save RAM` and `System Bus`; a
+world asking for anything else — `VRAM`, `PALRAM`, `Combined WRAM` — gets a
+named error rather than a silent stall, and the Archipelago tab shows which
+domain was wanted. Adding one is a few lines in `region_for()` in
+`src/gba_instance.cpp`.
+
+A GBA world that does not use Archipelago's BizHawk connector at all is out of
+reach, as is any game that is not a GBA game.
+
 ## How it works
 
 Each GBA runs on its own thread and owns its core outright. The host thread
@@ -170,6 +273,17 @@ processes it does not believe are Steam games, and on SteamOS those virtual pads
 are how a paired controller reaches an application at all. Add
 `tools/gba-quad-link.sh` as a non-Steam game. Directly connected USB pads work
 from a desktop terminal.
+
+**An Archipelago client that hangs holds up the ones behind it.** Game clients
+find their emulator by taking the first port that answers between 43055 and
+43059, so those ports are handed out one at a time — with two open at once, the
+second client's connection sits in a backlog nobody is listening to and times
+out instead of trying the next port. A client that dies drops out of the queue
+by itself. One that hangs says so after twenty seconds; **Clear** gets rid of it.
+
+Which client lands on which quadrant does not matter: a client takes its
+identity from the cartridge it finds, not from the patch it was started with, so
+four clients across four quadrants come out right in any order.
 
 **EmuDeck may reset Dolphin's SI ports.** Its launcher deploys a config with
 every port set to a standard controller, so a GBA (TCP) setting made through

@@ -8,6 +8,18 @@
 
 namespace gql {
 
+const char* Machine::stage_name(Machine::ApStage s) {
+    switch (s) {
+        case Machine::ApStage::Idle:        return "";
+        case Machine::ApStage::Searching:   return "finding cartridge";
+        case Machine::ApStage::Configuring: return "preparing";
+        case Machine::ApStage::Starting:    return "starting client";
+        case Machine::ApStage::Ready:       return "archipelago";
+        case Machine::ApStage::Failed:      return "archipelago failed";
+    }
+    return "";
+}
+
 const char* link_state_name(LinkState s) {
     switch (s) {
         case LinkState::Off:      return "no link";

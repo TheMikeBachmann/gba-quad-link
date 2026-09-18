@@ -41,6 +41,8 @@
 #include "layout.h"
 #include "machine.h"
 #include "paths.h"
+#include "ap_patch.h"
+#include "ap_worlds.h"
 #include "romlist.h"
 #include "settings.h"
 
@@ -118,6 +120,12 @@ void machine_thread(Machine* me, gql::AudioMixer* mixer) {
         const bool completed = me->gba.run_frame();
         me->gba.cable_wait();
         me->gba.note_sio_mode();
+        me->ap.serve(me->gba);
+        if (me->want_title.exchange(false, std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lk(me->fb_mutex);
+            me->title = me->gba.rom_title();
+            me->have_title = true;
+        }
         if (completed) ++frame;
 
         // Every machine is drained whether or not anyone is listening — an
@@ -220,6 +228,12 @@ int main(int argc, char** argv) {
     // established players must keep their positions on the cable; a newcomer
     // taking the parent's seat stops everybody.
     bool self_test_join = false;
+    // Reads each guest's cartridge title out of its own memory, which is what
+    // an Archipelago game client does to decide whether it is looking at the
+    // cartridge it expects.
+    bool dump_rom_title = false;
+    // Listen for Archipelago's game clients, one port per machine.
+    bool archipelago = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -230,6 +244,8 @@ int main(int argc, char** argv) {
     // every machine. The setup screen is the real interface; this is for
     // getting at it from a script.
     std::string per_rom[kMaxPlayers];
+    std::string per_patch[kMaxPlayers];
+    std::string ap_server_arg;
     gql::LinkMode per_mode[kMaxPlayers] = {};
     bool per_mode_set[kMaxPlayers] = {};
     int section = -1;
@@ -267,6 +283,14 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        else if (a == "--patch") {
+            if (section < 0) {
+                std::fprintf(stderr, "--patch needs a --player before it\n");
+                return 2;
+            }
+            per_patch[section] = next();
+        }
+        else if (a == "--ap-server") ap_server_arg = next();
         else if (a == "--bios") bios_path = next();
         else if (a == "--controls") cfg_path = next();
         else if (a == "--host") host = next();
@@ -276,6 +300,8 @@ int main(int argc, char** argv) {
         else if (a == "--log-sio") log_sio = true;
         else if (a == "--self-test-restart") self_test_restart = true;
         else if (a == "--self-test-join") self_test_join = true;
+        else if (a == "--dump-rom-title") dump_rom_title = true;
+        else if (a == "--archipelago") archipelago = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -289,7 +315,8 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P] [--link MODE]]...\n"
+                "          [--player N [--rom P] [--link MODE] [--patch P]]...\n"
+                "          [--archipelago] [--ap-server HOST:PORT]\n"
                 "          [--rom-dir D]\n"
                 "          [--cable] [--mirror-input]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
@@ -659,6 +686,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (archipelago) {
+        // Every machine wants a client. Which one is actually listening at any
+        // moment is decided in the main loop, one at a time; see there for
+        // why they cannot all listen at once.
+        for (int i = 0; i < players && i < gql::kApPortCount; ++i)
+            machines[i].ap_wants_client = true;
+    }
+
     for (int i = 0; i < players; ++i) {
         machines[i].thread = std::thread(
             machine_thread, &machines[i], &mixer);
@@ -713,6 +748,26 @@ int main(int argc, char** argv) {
     int browsing_for = -1;   // which player is picking, -1 for nobody
     std::string browsing_dir;             // non-empty while choosing a folder
     std::vector<gql::DirEntry> dir_entries;
+
+    // Choosing a patch file. Patches live wherever Archipelago put them; the
+    // default is this app's own folder for them, which is where the docs say
+    // to drop them.
+    // Which setting the folder browser is currently choosing for.
+    enum class DirTarget { Roms, Patches };
+    DirTarget dir_target = DirTarget::Roms;
+
+    int browsing_patch_for = -1;
+    std::string patch_dir = settings.patch_dir.empty()
+                                ? (gql::data_dir().empty()
+                                       ? std::string("patches")
+                                       : gql::data_dir() + "/patches")
+                                : settings.patch_dir;
+    std::vector<gql::RomEntry> patch_entries;
+    // Found at startup rather than when the Archipelago tab is first opened,
+    // because patches can be named on the command line and there may be no
+    // menu in it at all.
+    if (settings.ap_dir.empty()) settings.ap_dir = gql::find_ap_install();
+    if (!ap_server_arg.empty()) settings.ap_server = ap_server_arg;
     if (!roms.empty())
         std::printf("library: %d cartridges in %s\n", (int)roms.size(),
                     rom_dir.c_str());
@@ -722,11 +777,135 @@ int main(int argc, char** argv) {
     // where the cartridges were.
     const auto remember = [&]() {
         settings.rom_dir = rom_dir;
+        settings.patch_dir = patch_dir;
         settings.host = host;
         gql::save_settings(settings_path, settings);
     };
     if (!rom_dir.empty() && rom_dir != settings.rom_dir) remember();
 
+
+    // Everything between choosing a patch file and having a game running.
+    //
+    // On a thread because the middle of it can take two minutes: if the
+    // cartridge a patch wants has never been hashed, every archive in the
+    // library has to be opened to find it. Nothing here touches a core; it
+    // ends by leaving a path where the host thread will find it.
+    // Drops a player out of Archipelago entirely: kills their client, gives
+    // up their port, and takes them out of the queue for one. Also how a
+    // client that has hung is got rid of, since it would otherwise hold the
+    // listener against everybody behind it.
+    const auto clear_archipelago = [&](int i) {
+        Machine& m = machines[i];
+        if (m.ap_thread.joinable()) m.ap_thread.join();
+        m.ap_session.stop();
+        m.ap_wants_client = false;
+        m.ap.close();
+        m.ap_rom_ready.store(false);
+        m.ap_patch_path.clear();
+        m.ap_stage.store(Machine::ApStage::Idle);
+        m.set_ap_note("");
+    };
+
+    const auto begin_archipelago = [&](int i, const std::string& chosen) {
+        Machine& m = machines[i];
+        clear_archipelago(i);
+        // Made absolute here and not further down, because the client is
+        // started with its working directory changed to the Archipelago
+        // folder — a frozen build finds its own libraries relative to where it
+        // sits — and a relative path stops meaning anything at that point.
+        // The failure is quiet from our side: we read the patch fine, and the
+        // client is the one that cannot find it.
+        std::error_code pec;
+        const std::string patch_path =
+            std::filesystem::absolute(chosen, pec).string();
+        m.ap_patch_path = pec ? chosen : patch_path;
+        m.ap_stage.store(Machine::ApStage::Searching);
+        m.set_ap_note("reading patch");
+
+        const std::string ap_dir = settings.ap_dir;
+        const std::string server = settings.ap_server;
+        const std::string library = rom_dir;
+        const std::string cache = gql::data_dir().empty()
+                                      ? std::string()
+                                      : gql::data_dir() + "/base_roms";
+
+        m.ap_thread = std::thread([&m, i, patch_path, ap_dir, server, library, cache]() {
+            gql::ApPatch patch;
+            if (!gql::read_ap_patch(patch_path, &patch)) {
+                m.set_ap_note("not an Archipelago patch file");
+                m.ap_stage.store(Machine::ApStage::Failed);
+                return;
+            }
+            m.ap_patch = patch;
+            m.set_ap_note("finding " + patch.game);
+
+            const std::string base =
+                gql::find_base_rom(library, patch.base_checksums, cache, patch.game);
+            if (base.empty()) {
+                m.set_ap_note("no cartridge in your library matches this patch");
+                m.ap_stage.store(Machine::ApStage::Failed);
+                return;
+            }
+
+            m.ap_stage.store(Machine::ApStage::Configuring);
+            gql::ApWorld world;
+            if (!gql::find_ap_world(ap_dir, patch.game, &world)) {
+                m.set_ap_note(patch.game + " is not installed in Archipelago");
+                m.ap_stage.store(Machine::ApStage::Failed);
+                return;
+            }
+            std::string err;
+            if (!gql::set_ap_rom_path(ap_dir, world, base, &err)) {
+                m.set_ap_note("could not configure Archipelago: " + err);
+                m.ap_stage.store(Machine::ApStage::Failed);
+                return;
+            }
+
+            // Where the client will write the patched cartridge.
+            std::filesystem::path rom = patch_path;
+            rom.replace_extension(patch.result_ending);
+
+            m.ap_stage.store(Machine::ApStage::Starting);
+            m.set_ap_note("starting client for " + patch.player_name);
+            // A patch from the website carries its own address; one generated
+            // locally does not, and then we have to be told.
+            const std::string where = patch.server.empty() ? server : patch.server;
+            if (!m.ap_session.start(ap_dir, patch_path, where, rom.string(), &err)) {
+                m.set_ap_note(err);
+                m.ap_stage.store(Machine::ApStage::Failed);
+                return;
+            }
+
+            // The client patches before it does anything else, so this is
+            // quick — but it is somebody else's program and may fail.
+            for (int t = 0; t < 120; ++t) {
+                if (!m.ap_session.produced_rom().empty()) {
+                    std::lock_guard<std::mutex> lk(m.ap_mutex);
+                    m.ap_rom = m.ap_session.produced_rom();
+                    m.ap_rom_ready.store(true);
+                    m.ap_stage.store(Machine::ApStage::Ready);
+                    m.ap_note = "patched " + patch.player_name;
+                    return;
+                }
+                if (!m.ap_session.running()) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+            m.set_ap_note("client did not produce a cartridge");
+            m.ap_stage.store(Machine::ApStage::Failed);
+        });
+    };
+
+    // Patches named on the command line, started now that everything they
+    // need exists. Each takes a while and runs on its own thread, so this
+    // only kicks them off.
+    for (int i = 0; i < players; ++i) {
+        if (per_patch[i].empty()) continue;
+        if (settings.ap_dir.empty()) {
+            std::fprintf(stderr, "--patch: no Archipelago install found\n");
+            break;
+        }
+        begin_archipelago(i, per_patch[i]);
+    }
 
     // Hand one machine a different cartridge, without disturbing the others.
     // The thread has to go first: the instance belongs to it, and reopening a
@@ -937,6 +1116,83 @@ int main(int argc, char** argv) {
             }
         }
 
+        // A machine whose Archipelago setup has finished gets its cartridge
+        // here, on the thread allowed to restart machines.
+        for (int i = 0; i < players; ++i) {
+            if (!machines[i].ap_rom_ready.exchange(false)) continue;
+            std::string rom;
+            {
+                std::lock_guard<std::mutex> lk(machines[i].ap_mutex);
+                rom = machines[i].ap_rom;
+            }
+            if (rom.empty()) continue;
+            restart_machine(i, rom, machines[i].mode);
+            regroup();
+            machines[i].ap_wants_client = true;
+            status = "Player " + std::to_string(i + 1) + ": " +
+                     machines[i].ap_patch.player_name + " (" +
+                     machines[i].ap_patch.game + ")";
+        }
+
+        // Exactly one Archipelago listener is open at a time.
+        //
+        // A game client finds its emulator by walking ports 43055 upwards and
+        // taking the first that answers, and with two listeners open the
+        // second client's connection is accepted into the backlog of a socket
+        // nobody is accepting from: it waits there until it times out, rather
+        // than being refused and moving on to the next port. One at a time is
+        // what makes four clients sort themselves across four quadrants.
+        //
+        // Which client ends up on which quadrant does not matter, and it is
+        // worth knowing that it does not. A client takes its identity from the
+        // cartridge it finds rather than from the patch it was started with,
+        // so one that attaches to another player's quadrant simply plays that
+        // slot. Four clients over four quadrants is right in any order.
+        {
+            const long long now_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            int waiting = -1;
+            for (int i = 0; i < players; ++i)
+                if (machines[i].ap.listening()) { waiting = i; break; }
+
+            if (waiting < 0) {
+                for (int i = 0; i < players; ++i) {
+                    Machine& m = machines[i];
+                    if (!m.ap_wants_client || m.ap.client_connected()) continue;
+                    // A client that has died is not coming, and must not hold
+                    // the port shut against the players whose clients live.
+                    // Nothing checks this when the client is somebody else's,
+                    // which is what --archipelago means.
+                    if (!archipelago && !m.ap_session.running()) continue;
+                    const int port = gql::kApPortFirst + i;
+                    if (m.ap.open(port, i)) {
+                        m.ap_listen_since_ms = now_ms;
+                        std::printf("p%d archipelago: listening on "
+                                    "127.0.0.1:%d\n", i + 1, port);
+                    } else {
+                        m.ap_wants_client = false;
+                        m.set_ap_note("port " + std::to_string(port) +
+                                      " is taken - is BizHawk running?");
+                    }
+                    std::fflush(stdout);
+                    break;
+                }
+            } else if (now_ms - machines[waiting].ap_listen_since_ms > 20000 &&
+                       machines[waiting].ap_stage.load() ==
+                           Machine::ApStage::Ready) {
+                // The head of the queue holds the port, so a client that never
+                // arrives stops the other three getting theirs. Say so, rather
+                // than moving on: giving the port to the next player would let
+                // a slow client attach to the wrong quadrant later, which is
+                // the failure this whole arrangement exists to prevent.
+                machines[waiting].set_ap_note(
+                    "waiting for this client to attach - clear the slot to let "
+                    "the others through");
+            }
+        }
+
         const Uint8* ks = SDL_GetKeyboardState(nullptr);
         if (mirror_input) {
             // Whatever any player presses drives every machine. Only for
@@ -1015,6 +1271,40 @@ int main(int argc, char** argv) {
                 const char* pn = pads[i] ? SDL_GameControllerName(pads[i]) : nullptr;
                 std::snprintf(line, sizeof line, "%.14s", pn ? pn : "no pad");
                 dl->AddText(ImVec2(x, y + 64), IM_COL32(150, 150, 150, 255), line);
+
+                // Archipelago, for the same reason the link state is here:
+                // what goes wrong is one of the four quietly not being
+                // connected, and the menu is the one place nobody is looking
+                // while they play.
+                const auto stage = machines[i].ap_stage.load();
+                if (stage == Machine::ApStage::Idle) continue;
+
+                const std::string fault = machines[i].ap.fault();
+                ImU32 apc = IM_COL32(230, 200, 110, 255);
+                std::string what;
+                if (stage == Machine::ApStage::Failed || !fault.empty()) {
+                    apc = IM_COL32(230, 110, 110, 255);
+                    what = fault.empty() ? machines[i].get_ap_note() : fault;
+                } else if (machines[i].ap.client_connected()) {
+                    // Only read once the setup thread has moved the stage on,
+                    // which is what publishes the patch it read.
+                    apc = IM_COL32(120, 220, 120, 255);
+                    what = machines[i].ap_patch.player_name;
+                } else {
+                    what = Machine::stage_name(stage);
+                }
+                std::snprintf(line, sizeof line, "AP %.16s", what.c_str());
+                dl->AddText(ImVec2(x, y + 82), apc, line);
+
+                // The last thing the game client asked to be shown — an item
+                // going out or coming in. This is the only place it appears
+                // at all; a GBA has no room to draw it over the game.
+                const std::string msg = machines[i].ap.message();
+                if (!msg.empty()) {
+                    std::snprintf(line, sizeof line, "%.18s", msg.c_str());
+                    dl->AddText(ImVec2(x, y + 100),
+                                IM_COL32(170, 170, 170, 255), line);
+                }
             }
         }
 
@@ -1025,6 +1315,82 @@ int main(int argc, char** argv) {
                 "The machines keep running - Dolphin and the cable are waiting "
                 "on them. F1 or Select+Start closes this.");
             ImGui::Separator();
+            // Choosing a folder replaces the whole window rather than living
+            // inside one tab. Both the cartridge library and the patch folder
+            // need it, they are on different tabs, and a view that draws
+            // itself somewhere other than where it was asked for is invisible.
+            if (!browsing_dir.empty()) {
+            // Walking the filesystem with a controller. Folders only —
+            // picking a cartridge is the other browser's job, and this one
+            // only has to arrive at the folder they live in.
+            ImGui::TextUnformatted("Where are your cartridges?");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("cancel")) {
+                browsing_dir.clear();
+                dir_entries.clear();
+            }
+            ImGui::Separator();
+
+            for (const gql::DirEntry& r : gql::quick_roots()) {
+                ImGui::PushID(r.path.c_str());
+                if (ImGui::SmallButton(r.name.c_str())) {
+                    browsing_dir = r.path;
+                    dir_entries = gql::list_subdirs(browsing_dir);
+                }
+                ImGui::PopID();
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+
+            ImGui::TextWrapped("%s", browsing_dir.c_str());
+            const int here = gql::count_roms(browsing_dir);
+            // Said before they commit, so the right folder is recognisable
+            // without having to choose it and find out.
+            if (here > 0)
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
+                                   "%d cartridges in this folder", here);
+            else
+                ImGui::TextDisabled("no cartridges directly in this folder");
+
+            ImGui::BeginDisabled(here == 0);
+            if (ImGui::Button("Use this folder")) {
+                rom_dir = browsing_dir;
+                roms = gql::scan_roms(rom_dir);
+                remember();
+                status = "Found " + std::to_string(roms.size()) +
+                         " cartridges";
+                browsing_dir.clear();
+                dir_entries.clear();
+            }
+            ImGui::EndDisabled();
+            ImGui::Separator();
+
+            if (ImGui::BeginChild("dirs", ImVec2(0, 0), true)) {
+                const std::string up = gql::parent_dir(browsing_dir);
+                if (!up.empty() && ImGui::Selectable(".."))  {
+                    browsing_dir = up;
+                    dir_entries = gql::list_subdirs(browsing_dir);
+                }
+                for (int n = 0; n < (int)dir_entries.size(); ++n) {
+                    ImGui::PushID(n);
+                    const int inside = gql::count_roms(dir_entries[n].path);
+                    char label[320];
+                    std::snprintf(label, sizeof label, "%s%s",
+                                  dir_entries[n].name.c_str(),
+                                  inside ? "   >" : "");
+                    if (ImGui::Selectable(label)) {
+                        browsing_dir = dir_entries[n].path;
+                        dir_entries = gql::list_subdirs(browsing_dir);
+                    }
+                    if (inside) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(%d)", inside);
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+            } else {
             ImGui::BeginTabBar("tabs");
             if (ImGui::BeginTabItem("Games")) {
 
@@ -1218,6 +1584,7 @@ int main(int argc, char** argv) {
                     "their own - a character, a kart, a track vote.");
                 ImGui::Separator();
                 if (ImGui::Button("Change folder...")) {
+                    dir_target = DirTarget::Roms;
                     browsing_dir = rom_dir.empty() ? gql::default_rom_dir()
                                                    : rom_dir;
                     if (browsing_dir.empty()) browsing_dir = "/";
@@ -1230,77 +1597,6 @@ int main(int argc, char** argv) {
                     status = "Found " + std::to_string(roms.size()) +
                              " cartridges";
                 }
-            } else if (!browsing_dir.empty()) {
-                // Walking the filesystem with a controller. Folders only —
-                // picking a cartridge is the other browser's job, and this one
-                // only has to arrive at the folder they live in.
-                ImGui::TextUnformatted("Where are your cartridges?");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("cancel")) {
-                    browsing_dir.clear();
-                    dir_entries.clear();
-                }
-                ImGui::Separator();
-
-                for (const gql::DirEntry& r : gql::quick_roots()) {
-                    ImGui::PushID(r.path.c_str());
-                    if (ImGui::SmallButton(r.name.c_str())) {
-                        browsing_dir = r.path;
-                        dir_entries = gql::list_subdirs(browsing_dir);
-                    }
-                    ImGui::PopID();
-                    ImGui::SameLine();
-                }
-                ImGui::NewLine();
-
-                ImGui::TextWrapped("%s", browsing_dir.c_str());
-                const int here = gql::count_roms(browsing_dir);
-                // Said before they commit, so the right folder is recognisable
-                // without having to choose it and find out.
-                if (here > 0)
-                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f),
-                                       "%d cartridges in this folder", here);
-                else
-                    ImGui::TextDisabled("no cartridges directly in this folder");
-
-                ImGui::BeginDisabled(here == 0);
-                if (ImGui::Button("Use this folder")) {
-                    rom_dir = browsing_dir;
-                    roms = gql::scan_roms(rom_dir);
-                    remember();
-                    status = "Found " + std::to_string(roms.size()) +
-                             " cartridges";
-                    browsing_dir.clear();
-                    dir_entries.clear();
-                }
-                ImGui::EndDisabled();
-                ImGui::Separator();
-
-                if (ImGui::BeginChild("dirs", ImVec2(0, 0), true)) {
-                    const std::string up = gql::parent_dir(browsing_dir);
-                    if (!up.empty() && ImGui::Selectable(".."))  {
-                        browsing_dir = up;
-                        dir_entries = gql::list_subdirs(browsing_dir);
-                    }
-                    for (int n = 0; n < (int)dir_entries.size(); ++n) {
-                        ImGui::PushID(n);
-                        const int inside = gql::count_roms(dir_entries[n].path);
-                        char label[320];
-                        std::snprintf(label, sizeof label, "%s%s",
-                                      dir_entries[n].name.c_str(),
-                                      inside ? "   >" : "");
-                        if (ImGui::Selectable(label)) {
-                            browsing_dir = dir_entries[n].path;
-                            dir_entries = gql::list_subdirs(browsing_dir);
-                        }
-                        if (inside) {
-                            ImGui::SameLine();
-                            ImGui::TextDisabled("(%d)", inside);
-                        }
-                        ImGui::PopID();
-                    }
-                }
-                ImGui::EndChild();
             } else {
                 ImGui::Text("Cartridge for player %d", browsing_for + 1);
                 ImGui::SameLine();
@@ -1335,6 +1631,189 @@ int main(int argc, char** argv) {
                 ImGui::EndChild();
             }
             ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Archipelago")) {
+                if (settings.ap_dir.empty()) {
+                    const std::string found = gql::find_ap_install();
+                    if (!found.empty()) { settings.ap_dir = found; remember(); }
+                }
+                if (settings.ap_dir.empty()) {
+                    ImGui::TextWrapped(
+                        "Archipelago is not installed where this can find it. "
+                        "Put a copy in ~/.local/share/gba-quad-link/archipelago "
+                        "(an unpacked AppImage is fine) and reopen this tab.");
+                } else {
+                if (browsing_patch_for >= 0) {
+                    ImGui::Text("Patch for player %d", browsing_patch_for + 1);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("cancel")) browsing_patch_for = -1;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("change folder...")) {
+                        dir_target = DirTarget::Patches;
+                        browsing_dir = patch_dir;
+                        if (browsing_dir.empty()) browsing_dir = "/";
+                        dir_entries = gql::list_subdirs(browsing_dir);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("rescan"))
+                        patch_entries = gql::scan_roms(patch_dir);
+                    ImGui::Separator();
+                    ImGui::TextWrapped("From %s", patch_dir.c_str());
+                    if (patch_entries.empty())
+                        ImGui::TextDisabled(
+                            "Nothing here. Patch files come from a multiworld - a "
+                            "room page on the website, or the output of a local "
+                            "generation - and end in .ap followed by the game.");
+                    if (ImGui::BeginChild("patches", ImVec2(0, 0), true)) {
+                        for (int n = 0; n < (int)patch_entries.size(); ++n) {
+                            ImGui::PushID(n);
+                            if (ImGui::Selectable(patch_entries[n].display.c_str())) {
+                                begin_archipelago(browsing_patch_for,
+                                                  patch_entries[n].path);
+                                browsing_patch_for = -1;
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::EndChild();
+                } else {
+                    ImGui::TextWrapped("Using Archipelago at %s",
+                                       settings.ap_dir.c_str());
+                    ImGui::Separator();
+                    {
+                        static char srv[96] = {0};
+                        static bool srv_init = false;
+                        if (!srv_init) {
+                            std::snprintf(srv, sizeof srv, "%s",
+                                          settings.ap_server.c_str());
+                            srv_init = true;
+                        }
+                        ImGui::SetNextItemWidth(260.0f);
+                        if (ImGui::InputText("Multiworld address", srv, sizeof srv)) {
+                            settings.ap_server = srv;
+                            remember();
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(?)");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "Only needed for a seed generated locally. A "
+                                "patch downloaded from a room carries its own "
+                                "address and this is ignored.");
+                    }
+                    ImGui::Separator();
+                    for (int p = 0; p < players; ++p) {
+                        ImGui::PushID(5000 + p);
+                        char lbl[24];
+                        std::snprintf(lbl, sizeof lbl, "Player %d", p + 1);
+                        ImGui::TextUnformatted(lbl);
+                        ImGui::SameLine(90.0f);
+                        const auto stage = machines[p].ap_stage.load();
+                        const std::string note = machines[p].get_ap_note();
+                        if (ImGui::Button(machines[p].ap_patch_path.empty()
+                                              ? "Choose a patch..."
+                                              : std::filesystem::path(
+                                                    machines[p].ap_patch_path)
+                                                    .filename().string().c_str(),
+                                          ImVec2(300, 0))) {
+                            browsing_patch_for = p;
+                            patch_entries = gql::scan_roms(patch_dir);
+                        }
+                        // Only continue the line when there is actually
+                        // something to put on it. A SameLine followed by
+                        // nothing leaves the cursor where it is, and the next
+                        // player's row lands beside this one.
+                        if (stage != Machine::ApStage::Idle) {
+                            ImGui::SameLine();
+                            if (ImGui::Button("Clear")) clear_archipelago(p);
+                            ImGui::SameLine();
+
+                            const bool attached = machines[p].ap.client_connected();
+                            const bool listening = machines[p].ap.listening();
+                            const std::string fault = machines[p].ap.fault();
+                            if (stage == Machine::ApStage::Failed) {
+                                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
+                                                   "%s", note.c_str());
+                            } else if (!fault.empty()) {
+                                // Takes precedence over "attached", which is
+                                // true and beside the point: the client is
+                                // connected and getting nowhere, and this says
+                                // why.
+                                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
+                                                   "%s", fault.c_str());
+                            } else if (attached) {
+                                ImGui::TextColored(ImVec4(0.6f, 0.95f, 0.65f, 1.0f),
+                                                   "attached on port %d",
+                                                   machines[p].ap.port());
+                            } else if (listening) {
+                                ImGui::TextDisabled("%s", note.empty()
+                                    ? "waiting for its client" : note.c_str());
+                            } else if (machines[p].ap_wants_client) {
+                                // Ports are handed out one at a time, so this
+                                // player is behind somebody. Worth saying, or
+                                // a slot that is merely queued looks stuck.
+                                ImGui::TextDisabled("waiting for a free port");
+                            } else {
+                                ImGui::TextDisabled("%s", note.empty()
+                                    ? Machine::stage_name(stage) : note.c_str());
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+
+                    // What the clients are saying, in the order they said it.
+                    // Connecting to a multiworld goes wrong in a dozen ways —
+                    // a version mismatch, a wrong slot name, a server that
+                    // moved — and every one of them is a line here. Hiding it
+                    // would mean the only symptom is a quadrant that never
+                    // starts.
+                    ImGui::Separator();
+                    struct Tagged { unsigned long long seq; int player; std::string text; };
+                    std::vector<Tagged> lines;
+                    for (int p = 0; p < players; ++p)
+                        for (const auto& l : machines[p].ap_session.recent())
+                            lines.push_back(Tagged{l.seq, p, l.text});
+                    std::sort(lines.begin(), lines.end(),
+                              [](const Tagged& a, const Tagged& b) {
+                                  return a.seq < b.seq;
+                              });
+
+                    if (lines.empty()) {
+                        ImGui::TextDisabled(
+                            "No client output yet. Choose a patch for a player "
+                            "and what its client says will appear here.");
+                    } else {
+                        // BeginChild is paired with EndChild whatever it
+                        // returns. Treating its result as a condition and
+                        // ending unconditionally closes a scope that was never
+                        // opened, which unwinds the tab bar and the window with
+                        // it — the visible symptom being tabs that vanish and a
+                        // complaint stuck to the mouse pointer.
+                        ImGui::BeginChild("aplog", ImVec2(0, 0), true,
+                                          ImGuiWindowFlags_HorizontalScrollbar);
+                        static std::size_t shown = 0;
+                        static const ImVec4 kPlayerColour[4] = {
+                            {0.55f, 0.80f, 1.00f, 1.0f}, {1.00f, 0.80f, 0.50f, 1.0f},
+                            {0.60f, 0.95f, 0.65f, 1.0f}, {1.00f, 0.60f, 0.70f, 1.0f},
+                        };
+                        for (const Tagged& t : lines) {
+                            ImGui::TextColored(kPlayerColour[t.player & 3], "P%d",
+                                               t.player + 1);
+                            ImGui::SameLine();
+                            ImGui::TextUnformatted(t.text.c_str());
+                        }
+                        // Follow the tail only while new lines are arriving, so
+                        // scrolling back to read something does not fight it.
+                        if (lines.size() != shown) {
+                            shown = lines.size();
+                            ImGui::SetScrollHereY(1.0f);
+                        }
+                        ImGui::EndChild();
+                    }
+                    }
+                }
+                ImGui::EndTabItem();
             }
 
             if (ImGui::BeginTabItem("Audio")) {
@@ -1469,6 +1948,7 @@ int main(int argc, char** argv) {
             ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
+            }
 
             ImGui::Separator();
             // Escape closes the window; Game Mode has no keyboard and no title
@@ -1485,6 +1965,38 @@ int main(int argc, char** argv) {
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
         mixer.pump();
         SDL_RenderPresent(ren);
+
+        if (dump_rom_title) {
+            static auto asked = std::chrono::steady_clock::now();
+            static bool done = false;
+            const auto t = std::chrono::steady_clock::now();
+            if (!done && t - asked > std::chrono::seconds(3)) {
+                for (int i = 0; i < players; ++i)
+                    machines[i].want_title.store(true, std::memory_order_relaxed);
+                done = true;
+            }
+            static bool printed = false;
+            if (done && !printed && t - asked > std::chrono::seconds(4)) {
+                printed = true;
+                for (int i = 0; i < players; ++i) {
+                    std::lock_guard<std::mutex> lk(machines[i].fb_mutex);
+                    // Both: the cartridge's own title, and the offset
+                    // Archipelago's Emerald client reads to identify a patch.
+                    std::uint8_t ap[32] = {};
+                    machines[i].gba.read_memory("ROM", 0x108, ap, sizeof ap);
+                    std::string apname;
+                    for (std::uint8_t c : ap) { if (!c) break; if (c >= 0x20 && c < 0x7F) apname.push_back(char(c)); }
+                    std::printf("p%d title \"%s\"  ap@0x108 \"%s\"  "
+                                "EWRAM %zu IWRAM %zu ROM %zu SRAM %zu\n",
+                                i + 1, machines[i].title.c_str(), apname.c_str(),
+                                machines[i].gba.memory_size("EWRAM"),
+                                machines[i].gba.memory_size("IWRAM"),
+                                machines[i].gba.memory_size("ROM"),
+                                machines[i].gba.memory_size("Save RAM"));
+                }
+                std::fflush(stdout);
+            }
+        }
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_report >= std::chrono::seconds(5)) {
@@ -1503,6 +2015,7 @@ int main(int argc, char** argv) {
                                 machines[i].gba.sio_mode(),
                                 (unsigned)machines[i].gba.rcnt(),
                                 machines[i].gba.cable_sleeps());
+                    if (machines[i].ap.client_connected()) std::printf("[AP]");
                     if (machines[i].gba.cable_timeouts())
                         std::printf("[!%lu stalls]",
                                     machines[i].gba.cable_timeouts());
@@ -1519,6 +2032,9 @@ int main(int argc, char** argv) {
     // Before the joins, not after: a machine parked in a stalled run_frame()
     // never reaches the top of its loop to notice.
     for (int i = 0; i < players; ++i) {
+        machines[i].ap_session.stop();
+        if (machines[i].ap_thread.joinable()) machines[i].ap_thread.join();
+        machines[i].ap.close();
         machines[i].gba.shutdown_link();
         machines[i].gba.wake_cable();   // release anyone parked on the cable
     }

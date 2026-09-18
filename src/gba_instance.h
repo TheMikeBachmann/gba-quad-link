@@ -112,6 +112,42 @@ public:
 
     bool open_ok() const { return core_ != nullptr; }
 
+    // --- Memory, for the Archipelago connector --------------------------
+    //
+    // Call these from the core's own thread and nowhere else. They are not
+    // locked, and a core being read while it runs would hand back bytes from
+    // the middle of an instruction.
+    //
+    // `domain` is one of the names BizHawk gives its memory regions, because
+    // Archipelago's game clients were written against those names and pass
+    // them through untouched: "System Bus", "ROM", "EWRAM", "IWRAM",
+    // "Save RAM", "Combined WRAM". Anything else is refused rather than
+    // guessed at.
+    // Whether this is a memory domain this build implements at all, as
+    // distinct from one that exists but is currently empty. Worth separating:
+    // a world asking for a region nobody has needed yet is a gap to fill, and
+    // it should not look like a game misbehaving.
+    static bool known_domain(const std::string& domain);
+
+    // The domains above, for saying in an error message what is on offer.
+    static std::string known_domains();
+
+    std::size_t memory_size(const std::string& domain) const;
+    bool read_memory(const std::string& domain, std::uint32_t address,
+                     std::uint8_t* out, std::size_t size) const;
+    bool write_memory(const std::string& domain, std::uint32_t address,
+                      const std::uint8_t* data, std::size_t size);
+
+    // The cartridge's title, from the GBA header at 0xA0. Twelve bytes,
+    // padded with nulls.
+    //
+    // Not where Archipelago looks. Its game clients read whatever offset their
+    // own patcher writes a name to — Pokemon Emerald uses 0x108, which is past
+    // the header and into the game's own data, and means nothing on any other
+    // cartridge. They ask for that themselves through the connector; this is
+    // only for saying which cartridge a machine is holding.
+    std::string rom_title() const;
+
     // --- The Dolphin link -------------------------------------------------
     //
     // Two calls, because the two halves belong to different threads and the
