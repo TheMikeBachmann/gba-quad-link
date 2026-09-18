@@ -769,6 +769,8 @@ int main(int argc, char** argv) {
     // menu in it at all.
     if (settings.ap_dir.empty()) settings.ap_dir = gql::find_ap_install();
     gql::ApInstall ap_install;
+    gql::ApLatest ap_latest;
+    std::string ap_version;
     const std::string ap_install_dir =
         (gql::data_dir().empty() ? std::string("archipelago")
                                  : gql::data_dir() + "/archipelago");
@@ -1723,8 +1725,66 @@ int main(int argc, char** argv) {
                     }
                     ImGui::EndChild();
                 } else {
-                    ImGui::TextWrapped("Using Archipelago at %s",
-                                       settings.ap_dir.c_str());
+                    if (ap_version.empty())
+                        ap_version = gql::installed_ap_version(settings.ap_dir);
+                    if (ap_version.empty())
+                        ImGui::TextWrapped("Using Archipelago at %s",
+                                           settings.ap_dir.c_str());
+                    else
+                        ImGui::TextWrapped("Using Archipelago %s at %s",
+                                           ap_version.c_str(),
+                                           settings.ap_dir.c_str());
+
+                    // One small request, the first time anybody looks at this
+                    // tab. A machine with no network never hears back and
+                    // simply never offers an update.
+                    ap_latest.check();
+
+                    // Nothing may be replaced underneath a running client.
+                    bool clients_running = false;
+                    for (int p = 0; p < players; ++p)
+                        if (machines[p].ap_session.running()) clients_running = true;
+
+                    if (ap_install.busy()) {
+                        const float pr = ap_install.progress();
+                        if (pr >= 0.0f) ImGui::ProgressBar(pr, ImVec2(360, 0));
+                        else ImGui::ProgressBar(
+                                 -1.0f * static_cast<float>(ImGui::GetTime()),
+                                 ImVec2(360, 0), "working");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel")) ap_install.cancel();
+                        ImGui::TextDisabled("%s", ap_install.note().c_str());
+                    } else if (ap_latest.known() &&
+                               gql::version_is_newer(ap_latest.tag(), ap_version)) {
+                        char up[64];
+                        std::snprintf(up, sizeof up, "Update to %s",
+                                      ap_latest.tag().c_str());
+                        ImGui::BeginDisabled(clients_running);
+                        if (ImGui::Button(up, ImVec2(360, 0)))
+                            ap_install.start(ap_install_dir, settings.ap_dir);
+                        ImGui::EndDisabled();
+                        if (clients_running) {
+                            ImGui::TextDisabled(
+                                "Clear the Archipelago slots first - this "
+                                "replaces the copy they are running from.");
+                        } else {
+                            ImGui::TextDisabled(
+                                "Your settings, community worlds and seeds are "
+                                "carried over.");
+                        }
+                    }
+
+                    if (ap_install.stage() == gql::ApInstall::Stage::Failed) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "%s",
+                                           ap_install.note().c_str());
+                    }
+                    if (ap_install.stage() == gql::ApInstall::Stage::Done &&
+                        !ap_install.installed().empty() &&
+                        ap_install.installed() != settings.ap_dir) {
+                        settings.ap_dir = ap_install.installed();
+                        ap_version.clear();
+                        remember();
+                    }
                     ImGui::Separator();
                     {
                         static char srv[96] = {0};

@@ -124,6 +124,15 @@ It is a button rather than something that happens on its own, because 90MB is
 a lot to spend on somebody's connection because they opened a tab to see what
 was on it, and because what arrives is a program that then gets run.
 
+Once it is installed, the tab names the version and offers **Update to X** when
+a newer release exists. An update keeps what is yours — `host.yaml` with each
+world's cartridge path, community `.apworld` files, generated seeds and your
+player configuration — and takes everything else from the new release. The new
+copy is staged beside the old one and only swapped in once it has unpacked and
+been migrated, so a failed or cancelled update leaves the working install
+untouched. It is refused while a client is running, since that would replace
+the copy the client is running from.
+
 To use a copy you already have instead, put it anywhere below one of:
 
 ```
