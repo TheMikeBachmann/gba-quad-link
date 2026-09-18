@@ -31,7 +31,10 @@ std::string lower(std::string s) {
 
 bool looks_like_rom(const fs::path& p) {
     const std::string ext = lower(p.extension().string());
-    return ext == ".gba" || ext == ".7z" || ext == ".zip";
+    if (ext == ".gba" || ext == ".7z" || ext == ".zip") return true;
+    // Archipelago patch files are named after the game they patch — .apemerald,
+    // .apmzm, .apbn3 — so there is no fixed list to check against.
+    return ext.rfind(".ap", 0) == 0 && ext.size() > 3;
 }
 
 }  // namespace

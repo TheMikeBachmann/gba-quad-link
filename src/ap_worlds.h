@@ -54,4 +54,12 @@ bool find_ap_world(const std::string& ap_dir, const std::string& game,
 bool set_ap_rom_path(const std::string& ap_dir, const ApWorld& world,
                      const std::string& rom, std::string* err);
 
+// Where Archipelago is, if it can be found without being told.
+//
+// Looks for the directory holding ArchipelagoBizHawkClient: beside the
+// executable, in this app's data directory, and in the usual places somebody
+// would have unpacked it. Empty if there is none, which is not an error — it
+// only means the user has to say, or let us fetch one.
+std::string find_ap_install();
+
 }  // namespace gql

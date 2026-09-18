@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <filesystem>
 
 namespace gql {
@@ -22,6 +23,10 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr std::size_t kRecentLines = 60;
+
+// Shared by every session, so lines from different players can be ordered
+// against each other.
+std::atomic<unsigned long long> g_line_seq{0};
 constexpr const char* kClient = "ArchipelagoBizHawkClient";
 
 // Noise the frozen build prints on the way up, every time, which would
@@ -170,7 +175,7 @@ std::string ApSession::status() const {
     return status_;
 }
 
-std::vector<std::string> ApSession::recent() const {
+std::vector<ApSession::Line> ApSession::recent() const {
     std::lock_guard<std::mutex> lk(mutex_);
     return {recent_.begin(), recent_.end()};
 }
@@ -191,7 +196,7 @@ void ApSession::pump() {
             if (boring(line)) continue;
 
             std::lock_guard<std::mutex> lk(mutex_);
-            recent_.push_back(line);
+            recent_.push_back(Line{g_line_seq.fetch_add(1), line});
             while (recent_.size() > kRecentLines) recent_.pop_front();
             if (const char* s = classify(line)) status_ = s;
         }

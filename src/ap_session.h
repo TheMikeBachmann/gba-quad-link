@@ -56,7 +56,13 @@ public:
     // is scraped from log lines, which are not an interface and change between
     // releases.
     std::string status() const;
-    std::vector<std::string> recent() const;
+
+    // Recent output, each line tagged with the order it arrived in. The tag is
+    // process-wide, so several players' logs can be put back into the order
+    // things actually happened — which is the only way a line about one player
+    // connecting makes sense next to a line about another.
+    struct Line { unsigned long long seq; std::string text; };
+    std::vector<Line> recent() const;
 
 private:
     void pump();   // reads the client's output
@@ -71,7 +77,7 @@ private:
     mutable std::mutex mutex_;
     std::string status_ = "not started";
     std::string rom_;
-    std::deque<std::string> recent_;
+    std::deque<Line> recent_;
 };
 
 }  // namespace gql

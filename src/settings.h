@@ -27,6 +27,13 @@ struct Settings {
     // at once really is noise — but it is a default, not a rule.
     bool audio_on[4] = {true, false, false, false};
     float audio_gain[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    // Archipelago: where it is installed, and the multiworld to join. The
+    // address is remembered because a locally generated patch does not carry
+    // one and nobody wants to type it twice.
+    std::string ap_dir;
+    std::string ap_server;
+    std::string patch_dir;
 };
 
 // Missing file is not a failure; it just leaves the defaults alone.

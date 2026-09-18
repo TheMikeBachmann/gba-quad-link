@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <regex>
+#include <cstdlib>
 #include <map>
 #include <sstream>
 
@@ -139,6 +140,33 @@ bool find_ap_world(const std::string& ap_dir, const std::string& game,
         }
     }
     return false;
+}
+
+std::string find_ap_install() {
+    std::error_code ec;
+    std::vector<fs::path> roots;
+    if (const char* e = std::getenv("GQL_AP_DIR")) roots.emplace_back(e);
+    if (const char* home = std::getenv("HOME")) {
+        const fs::path h(home);
+        // Where this app would put one it fetched itself.
+        roots.push_back(h / ".local/share/gba-quad-link/archipelago");
+        roots.push_back(h / ".local/share/gba-quad-link/archipelago/squashfs-root/opt/Archipelago");
+        roots.push_back(h / "Archipelago");
+        roots.push_back(h / "Documents/4PGCRemote/Archipelago/squashfs-root/opt/Archipelago");
+        roots.push_back(h / "Applications/Archipelago");
+    }
+    roots.emplace_back("Archipelago/squashfs-root/opt/Archipelago");
+    roots.emplace_back("Archipelago");
+
+    for (const fs::path& r : roots) {
+        if (r.empty()) continue;
+        if (fs::exists(r / "ArchipelagoBizHawkClient", ec)) return r.string();
+        // An unpacked AppImage keeps everything a level or two down.
+        const fs::path nested = r / "squashfs-root/opt/Archipelago";
+        if (fs::exists(nested / "ArchipelagoBizHawkClient", ec))
+            return nested.string();
+    }
+    return {};
 }
 
 bool set_ap_rom_path(const std::string& ap_dir, const ApWorld& world,
