@@ -1271,6 +1271,40 @@ int main(int argc, char** argv) {
                 const char* pn = pads[i] ? SDL_GameControllerName(pads[i]) : nullptr;
                 std::snprintf(line, sizeof line, "%.14s", pn ? pn : "no pad");
                 dl->AddText(ImVec2(x, y + 64), IM_COL32(150, 150, 150, 255), line);
+
+                // Archipelago, for the same reason the link state is here:
+                // what goes wrong is one of the four quietly not being
+                // connected, and the menu is the one place nobody is looking
+                // while they play.
+                const auto stage = machines[i].ap_stage.load();
+                if (stage == Machine::ApStage::Idle) continue;
+
+                const std::string fault = machines[i].ap.fault();
+                ImU32 apc = IM_COL32(230, 200, 110, 255);
+                std::string what;
+                if (stage == Machine::ApStage::Failed || !fault.empty()) {
+                    apc = IM_COL32(230, 110, 110, 255);
+                    what = fault.empty() ? machines[i].get_ap_note() : fault;
+                } else if (machines[i].ap.client_connected()) {
+                    // Only read once the setup thread has moved the stage on,
+                    // which is what publishes the patch it read.
+                    apc = IM_COL32(120, 220, 120, 255);
+                    what = machines[i].ap_patch.player_name;
+                } else {
+                    what = Machine::stage_name(stage);
+                }
+                std::snprintf(line, sizeof line, "AP %.16s", what.c_str());
+                dl->AddText(ImVec2(x, y + 82), apc, line);
+
+                // The last thing the game client asked to be shown — an item
+                // going out or coming in. This is the only place it appears
+                // at all; a GBA has no room to draw it over the game.
+                const std::string msg = machines[i].ap.message();
+                if (!msg.empty()) {
+                    std::snprintf(line, sizeof line, "%.18s", msg.c_str());
+                    dl->AddText(ImVec2(x, y + 100),
+                                IM_COL32(170, 170, 170, 255), line);
+                }
             }
         }
 

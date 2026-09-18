@@ -174,6 +174,11 @@ from a room carries its own, and the box is ignored.
 Four slots at once is tested, not assumed: four clients, two games, all four
 joining the same multiworld from one window.
 
+While you are playing, each quadrant's status column shows its Archipelago
+slot name and the last item that went out or came in — the menu is the one
+place nobody is looking mid-game, and a client that has quietly stopped is
+otherwise invisible.
+
 Each player's client output appears on the tab, interleaved in the order things
 actually happened, which is the only useful way to read four connections at
 once. **Clear** drops a player out of Archipelago entirely and kills their
