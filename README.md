@@ -133,7 +133,8 @@ The Archipelago tab says which copy it found.
 
 **2. Own the base cartridge.** Put it in your ROM library folder (set on the
 Games tab). It is found by checksum, so the filename does not matter, and it may
-be inside a `.zip` or `.7z`.
+be inside a `.zip` or `.7z`. Some worlds accept more than one acceptable dump —
+Castlevania: Circle of the Moon names two — and any of them will do.
 
 **3. Get a patch file.** Either download your slot's patch from the room page,
 or generate a seed locally with `ArchipelagoGenerate`. Patches default to

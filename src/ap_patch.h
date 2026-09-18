@@ -29,7 +29,11 @@ struct ApPatch {
     std::string game;            // "Pokemon Emerald"
     std::string player_name;     // the slot to connect as
     std::string server;          // often empty; see above
-    std::string base_checksum;   // md5 of the cartridge this applies to
+    // The cartridges this patch may be applied to, as md5. Plural, because a
+    // world that accepts more than one acceptable dump lists them all —
+    // Castlevania: Circle of the Moon names two — and the field is then a JSON
+    // array rather than a string.
+    std::vector<std::string> base_checksums;
     std::string result_ending;   // ".gba"
     int player = 0;
 };
@@ -56,7 +60,8 @@ std::string md5_of_file(const std::string& path);
 // `game` is the name from the manifest, used to try the likely cartridges
 // first — hashing a whole library takes over a minute and the answer is nearly
 // always the file whose name resembles the game.
-std::string find_base_rom(const std::string& dir, const std::string& checksum,
+std::string find_base_rom(const std::string& dir,
+                          const std::vector<std::string>& checksums,
                           const std::string& cache_dir,
                           const std::string& game = {},
                           void (*progress)(const std::string&, int, int) = nullptr);

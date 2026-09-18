@@ -232,18 +232,37 @@ bool read_ap_patch(const std::string& path, ApPatch* out) {
     out->game = v.str("game");
     out->player_name = v.str("player_name");
     out->server = v.str("server");
-    out->base_checksum = v.str("base_checksum");
+    // Either a string or an array of them; a world that accepts several
+    // acceptable dumps lists them all.
+    out->base_checksums.clear();
+    if (const json::Value* bc = v.find("base_checksum")) {
+        if (bc->type == json::Value::Type::String) {
+            if (!bc->string.empty()) out->base_checksums.push_back(bc->string);
+        } else if (bc->type == json::Value::Type::Array) {
+            for (const json::Value& e : bc->array)
+                if (e.type == json::Value::Type::String && !e.string.empty())
+                    out->base_checksums.push_back(e.string);
+        }
+    }
     out->result_ending = v.str("result_file_ending", ".gba");
     out->player = static_cast<int>(v.integer("player"));
     out->valid = !out->game.empty() && !out->player_name.empty();
     return out->valid;
 }
 
-std::string find_base_rom(const std::string& dir, const std::string& checksum,
+std::string find_base_rom(const std::string& dir,
+                          const std::vector<std::string>& checksums,
                           const std::string& cache_dir, const std::string& game,
                           void (*progress)(const std::string&, int, int)) {
-    if (dir.empty() || checksum.empty()) return {};
+    if (dir.empty() || checksums.empty()) return {};
     std::error_code ec;
+
+    const auto wanted = [&checksums](const std::string& h) {
+        if (h.empty()) return false;
+        for (const std::string& c : checksums)
+            if (h == c) return true;
+        return false;
+    };
 
     // Anything already unpacked is checked first: the common case is a
     // cartridge we extracted for an earlier patch, and it costs one hash
@@ -253,7 +272,7 @@ std::string find_base_rom(const std::string& dir, const std::string& checksum,
         if (!ec)
             for (const fs::directory_entry& e : cached)
                 if (e.is_regular_file(ec) &&
-                    md5_of_file(e.path().string()) == checksum)
+                    wanted(md5_of_file(e.path().string())))
                     return e.path().string();
     }
 
@@ -296,7 +315,7 @@ std::string find_base_rom(const std::string& dir, const std::string& checksum,
         const auto known = cache.entries.find(key);
         if (known != cache.entries.end() && known->second.size == sz &&
             known->second.mtime == mt) {
-            if (known->second.md5 != checksum) continue;
+            if (!wanted(known->second.md5)) continue;
             // It matched, but the bytes may be inside an archive; fall through
             // so the extraction below still happens.
         }
@@ -306,7 +325,7 @@ std::string find_base_rom(const std::string& dir, const std::string& checksum,
             const std::string h = md5_of_file(key);
             cache.entries[key] = {sz, mt, h};
             cache.dirty = true;
-            if (h == checksum) { cache.save(); return key; }
+            if (wanted(h)) { cache.save(); return key; }
             continue;
         }
 
@@ -329,7 +348,7 @@ std::string find_base_rom(const std::string& dir, const std::string& checksum,
                 cache.entries[key] = {sz, mt, h};
                 cache.dirty = true;
             }
-            const bool ok = (h == checksum);
+            const bool ok = wanted(h);
             if (ok) {
                 // Copy it out: Archipelago needs a real file, and a member of
                 // an archive stops existing when the archive closes.

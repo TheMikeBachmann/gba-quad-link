@@ -840,7 +840,7 @@ int main(int argc, char** argv) {
             m.set_ap_note("finding " + patch.game);
 
             const std::string base =
-                gql::find_base_rom(library, patch.base_checksum, cache, patch.game);
+                gql::find_base_rom(library, patch.base_checksums, cache, patch.game);
             if (base.empty()) {
                 m.set_ap_note("no cartridge in your library matches this patch");
                 m.ap_stage.store(Machine::ApStage::Failed);
