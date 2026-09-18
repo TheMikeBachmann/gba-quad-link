@@ -105,6 +105,12 @@ struct Machine {
     // means the people still playing get the space.
     bool shown = true;
 
+    // Asking the machine to read something out of its own core, since only
+    // its own thread may.
+    std::atomic<bool> want_title{false};
+    std::string title;
+    bool have_title = false;
+
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.
     std::atomic<bool> stop{false};

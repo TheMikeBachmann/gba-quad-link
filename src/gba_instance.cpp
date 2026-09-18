@@ -13,6 +13,8 @@
 #include <mgba-util/vfs.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/video.h>
+#include <mgba/internal/gba/memory.h>
+#include <mgba/internal/gba/savedata.h>
 #include <mgba/internal/gba/sio.h>
 #include <mgba/internal/gba/sio/dolphin.h>
 #include <mgba/internal/gba/sio/lockstep.h>
@@ -28,6 +30,7 @@
 
 #include <cerrno>
 #include <cstddef>
+#include <cstring>
 
 #include <cstdarg>
 #include <cstdio>
@@ -457,6 +460,86 @@ void GbaInstance::attach() {
     // first timing event. Both need the sockets to already be live.
     GBASIOSetDriver(&gba->sio, &link_->dol.d);
     link_->attached = true;
+}
+
+namespace {
+
+// Where each name Archipelago might use actually lives. Returning the buffer
+// directly where one exists avoids going through the bus, which for a GBA is
+// not a plain array lookup — reads there run the memory controller's timing
+// and open-bus behaviour, and a debugger peeking should not do either.
+struct Region { std::uint8_t* base; std::size_t size; };
+
+Region region_for(struct GBA* gba, const std::string& domain) {
+    if (domain == "EWRAM")
+        return {reinterpret_cast<std::uint8_t*>(gba->memory.wram), GBA_SIZE_EWRAM};
+    if (domain == "IWRAM")
+        return {reinterpret_cast<std::uint8_t*>(gba->memory.iwram), GBA_SIZE_IWRAM};
+    if (domain == "ROM")
+        return {reinterpret_cast<std::uint8_t*>(gba->memory.rom), gba->memory.romSize};
+    if (domain == "Save RAM")
+        return {gba->memory.savedata.data, GBASavedataSize(&gba->memory.savedata)};
+    return {nullptr, 0};
+}
+
+}  // namespace
+
+std::size_t GbaInstance::memory_size(const std::string& domain) const {
+    if (!core_) return 0;
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+    // The whole address space, which is what BizHawk reports for it.
+    if (domain == "System Bus") return 0x10000000;
+    return region_for(gba, domain).size;
+}
+
+bool GbaInstance::read_memory(const std::string& domain, std::uint32_t address,
+                              std::uint8_t* out, std::size_t size) const {
+    if (!core_ || !out) return false;
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+
+    const Region r = region_for(gba, domain);
+    if (r.base) {
+        if (address > r.size || size > r.size - address) return false;
+        std::memcpy(out, r.base + address, size);
+        return true;
+    }
+    if (domain != "System Bus") return false;
+    for (std::size_t i = 0; i < size; ++i)
+        out[i] = static_cast<std::uint8_t>(
+            core_->busRead8(core_, address + static_cast<std::uint32_t>(i)));
+    return true;
+}
+
+bool GbaInstance::write_memory(const std::string& domain, std::uint32_t address,
+                               const std::uint8_t* data, std::size_t size) {
+    if (!core_ || !data) return false;
+    struct GBA* gba = static_cast<struct GBA*>(core_->board);
+
+    // Writing to ROM is meaningless on hardware and a good way to confuse a
+    // running game, so it is refused rather than quietly allowed.
+    if (domain == "ROM") return false;
+
+    const Region r = region_for(gba, domain);
+    if (r.base) {
+        if (address > r.size || size > r.size - address) return false;
+        std::memcpy(r.base + address, data, size);
+        return true;
+    }
+    if (domain != "System Bus") return false;
+    for (std::size_t i = 0; i < size; ++i)
+        core_->busWrite8(core_, address + static_cast<std::uint32_t>(i), data[i]);
+    return true;
+}
+
+std::string GbaInstance::rom_title() const {
+    std::uint8_t buf[12] = {};
+    if (!read_memory("ROM", 0xA0, buf, sizeof buf)) return {};
+    std::string out;
+    for (const std::uint8_t c : buf) {
+        if (c == 0) break;
+        out.push_back(static_cast<char>(c));
+    }
+    return out;
 }
 
 void GbaInstance::shutdown_link() {

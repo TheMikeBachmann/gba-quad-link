@@ -118,6 +118,11 @@ void machine_thread(Machine* me, gql::AudioMixer* mixer) {
         const bool completed = me->gba.run_frame();
         me->gba.cable_wait();
         me->gba.note_sio_mode();
+        if (me->want_title.exchange(false, std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lk(me->fb_mutex);
+            me->title = me->gba.rom_title();
+            me->have_title = true;
+        }
         if (completed) ++frame;
 
         // Every machine is drained whether or not anyone is listening — an
@@ -220,6 +225,10 @@ int main(int argc, char** argv) {
     // established players must keep their positions on the cable; a newcomer
     // taking the parent's seat stops everybody.
     bool self_test_join = false;
+    // Reads each guest's cartridge title out of its own memory, which is what
+    // an Archipelago game client does to decide whether it is looking at the
+    // cartridge it expects.
+    bool dump_rom_title = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -276,6 +285,7 @@ int main(int argc, char** argv) {
         else if (a == "--log-sio") log_sio = true;
         else if (a == "--self-test-restart") self_test_restart = true;
         else if (a == "--self-test-join") self_test_join = true;
+        else if (a == "--dump-rom-title") dump_rom_title = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -1485,6 +1495,38 @@ int main(int argc, char** argv) {
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
         mixer.pump();
         SDL_RenderPresent(ren);
+
+        if (dump_rom_title) {
+            static auto asked = std::chrono::steady_clock::now();
+            static bool done = false;
+            const auto t = std::chrono::steady_clock::now();
+            if (!done && t - asked > std::chrono::seconds(3)) {
+                for (int i = 0; i < players; ++i)
+                    machines[i].want_title.store(true, std::memory_order_relaxed);
+                done = true;
+            }
+            static bool printed = false;
+            if (done && !printed && t - asked > std::chrono::seconds(4)) {
+                printed = true;
+                for (int i = 0; i < players; ++i) {
+                    std::lock_guard<std::mutex> lk(machines[i].fb_mutex);
+                    // Both: the cartridge's own title, and the offset
+                    // Archipelago's Emerald client reads to identify a patch.
+                    std::uint8_t ap[32] = {};
+                    machines[i].gba.read_memory("ROM", 0x108, ap, sizeof ap);
+                    std::string apname;
+                    for (std::uint8_t c : ap) { if (!c) break; if (c >= 0x20 && c < 0x7F) apname.push_back(char(c)); }
+                    std::printf("p%d title \"%s\"  ap@0x108 \"%s\"  "
+                                "EWRAM %zu IWRAM %zu ROM %zu SRAM %zu\n",
+                                i + 1, machines[i].title.c_str(), apname.c_str(),
+                                machines[i].gba.memory_size("EWRAM"),
+                                machines[i].gba.memory_size("IWRAM"),
+                                machines[i].gba.memory_size("ROM"),
+                                machines[i].gba.memory_size("Save RAM"));
+                }
+                std::fflush(stdout);
+            }
+        }
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_report >= std::chrono::seconds(5)) {
