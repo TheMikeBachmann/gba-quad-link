@@ -118,6 +118,7 @@ bool ApSession::start(const std::string& ap_dir, const std::string& patch,
     ::close(in_pipe[0]);
     ::close(out_pipe[1]);
     pid_ = pid;
+    started_ = fs::file_time_type::clock::now();
     stdin_fd_ = in_pipe[1];
     stdout_fd_ = out_pipe[0];
     patch_ = patch;
@@ -166,7 +167,10 @@ bool ApSession::running() const {
 std::string ApSession::produced_rom() const {
     std::lock_guard<std::mutex> lk(mutex_);
     std::error_code ec;
-    if (rom_.empty() || !fs::exists(rom_, ec)) return {};
+    if (rom_.empty()) return {};
+    const auto written = fs::last_write_time(rom_, ec);
+    if (ec) return {};                  // not there yet, or gone
+    if (written < started_) return {};   // last run's, not this one's
     return rom_;
 }
 

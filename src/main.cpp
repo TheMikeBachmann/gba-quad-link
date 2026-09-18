@@ -806,10 +806,19 @@ int main(int argc, char** argv) {
         m.set_ap_note("");
     };
 
-    const auto begin_archipelago = [&](int i, const std::string& patch_path) {
+    const auto begin_archipelago = [&](int i, const std::string& chosen) {
         Machine& m = machines[i];
         clear_archipelago(i);
-        m.ap_patch_path = patch_path;
+        // Made absolute here and not further down, because the client is
+        // started with its working directory changed to the Archipelago
+        // folder — a frozen build finds its own libraries relative to where it
+        // sits — and a relative path stops meaning anything at that point.
+        // The failure is quiet from our side: we read the patch fine, and the
+        // client is the one that cannot find it.
+        std::error_code pec;
+        const std::string patch_path =
+            std::filesystem::absolute(chosen, pec).string();
+        m.ap_patch_path = pec ? chosen : patch_path;
         m.ap_stage.store(Machine::ApStage::Searching);
         m.set_ap_note("reading patch");
 

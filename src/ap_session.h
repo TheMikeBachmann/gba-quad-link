@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -49,6 +50,13 @@ public:
 
     // Where the client wrote the patched cartridge, once it has. Empty until
     // then, and empty if patching failed.
+    //
+    // "Once it has" is checked by modification time, not by the file being
+    // there. The client writes its output next to the patch under a name
+    // derived from it, so the previous run's cartridge is sitting at exactly
+    // the path this one is waiting for — and a patch that fails would
+    // otherwise look like a patch that succeeded, handing somebody an older
+    // seed's cartridge while their client talks about this one.
     std::string produced_rom() const;
 
     // A short description of what the client is doing, for the status gutter,
@@ -74,6 +82,7 @@ private:
     std::atomic<bool> quit_{false};
 
     std::string patch_;
+    std::filesystem::file_time_type started_;
     mutable std::mutex mutex_;
     std::string status_ = "not started";
     std::string rom_;
