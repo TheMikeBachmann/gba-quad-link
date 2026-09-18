@@ -1623,8 +1623,15 @@ int main(int argc, char** argv) {
                         ImGui::TextDisabled(
                             "No client output yet. Choose a patch for a player "
                             "and what its client says will appear here.");
-                    } else if (ImGui::BeginChild("aplog", ImVec2(0, 0), true,
-                                                 ImGuiWindowFlags_HorizontalScrollbar)) {
+                    } else {
+                        // BeginChild is paired with EndChild whatever it
+                        // returns. Treating its result as a condition and
+                        // ending unconditionally closes a scope that was never
+                        // opened, which unwinds the tab bar and the window with
+                        // it — the visible symptom being tabs that vanish and a
+                        // complaint stuck to the mouse pointer.
+                        ImGui::BeginChild("aplog", ImVec2(0, 0), true,
+                                          ImGuiWindowFlags_HorizontalScrollbar);
                         static std::size_t shown = 0;
                         static const ImVec4 kPlayerColour[4] = {
                             {0.55f, 0.80f, 1.00f, 1.0f}, {1.00f, 0.80f, 0.50f, 1.0f},
@@ -1642,8 +1649,8 @@ int main(int argc, char** argv) {
                             shown = lines.size();
                             ImGui::SetScrollHereY(1.0f);
                         }
+                        ImGui::EndChild();
                     }
-                    ImGui::EndChild();
                     }
                 }
                 ImGui::EndTabItem();
