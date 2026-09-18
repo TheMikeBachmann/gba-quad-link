@@ -11,12 +11,22 @@
 // ports, four machines — so each quadrant has a port of its own and four game
 // clients attach to four guests without any of them knowing the others exist.
 //
-// Which is why a connector never opens or reclaims its own port. Nothing in
-// that scan tells a client which player it belongs to; it simply takes the
-// lowest port that answers. Two connectors listening at the same time is
-// therefore a race between two clients for the lower one, so the decision to
-// listen belongs to whoever can see all four machines, and is made one at a
+// Which is why a connector never opens or reclaims its own port. The decision
+// belongs to whoever can see all four machines, and is made one listener at a
 // time. See the coordinator in main.cpp.
+//
+// Not, as it turns out, to keep a particular client with a particular player:
+// a client takes its identity from the cartridge it finds — validate_rom sets
+// the slot it authenticates as, and it disconnects if the ROM changes — so one
+// that attaches to a different quadrant simply plays that slot instead, and
+// four clients across four quadrants come out right whatever order they arrive
+// in. Measured, with the two games alternating across the quadrants so a
+// crossed pairing could not validate: four slots, no rejection.
+//
+// What one at a time actually buys is that every quadrant gets exactly one
+// client. With two listeners open, the second client'''s connection lands in the
+// backlog of a socket nobody is accepting from, and it waits there until it
+// times out rather than being refused and trying the next port.
 //
 // Threading follows the rule the rest of the program runs on: a core belongs
 // to the thread driving it. The socket lives on its own thread and never

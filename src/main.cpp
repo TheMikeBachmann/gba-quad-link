@@ -244,6 +244,8 @@ int main(int argc, char** argv) {
     // every machine. The setup screen is the real interface; this is for
     // getting at it from a script.
     std::string per_rom[kMaxPlayers];
+    std::string per_patch[kMaxPlayers];
+    std::string ap_server_arg;
     gql::LinkMode per_mode[kMaxPlayers] = {};
     bool per_mode_set[kMaxPlayers] = {};
     int section = -1;
@@ -281,6 +283,14 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        else if (a == "--patch") {
+            if (section < 0) {
+                std::fprintf(stderr, "--patch needs a --player before it\n");
+                return 2;
+            }
+            per_patch[section] = next();
+        }
+        else if (a == "--ap-server") ap_server_arg = next();
         else if (a == "--bios") bios_path = next();
         else if (a == "--controls") cfg_path = next();
         else if (a == "--host") host = next();
@@ -305,7 +315,8 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                 "usage: %s [--players 1-4] [--rom P] [--bios P] [--host H]\n"
-                "          [--player N [--rom P] [--link MODE]]...\n"
+                "          [--player N [--rom P] [--link MODE] [--patch P]]...\n"
+                "          [--archipelago] [--ap-server HOST:PORT]\n"
                 "          [--rom-dir D]\n"
                 "          [--cable] [--mirror-input]\n"
                 "          [--data-port N] [--clock-port N] [--controls P]\n"
@@ -752,6 +763,11 @@ int main(int argc, char** argv) {
                                        : gql::data_dir() + "/patches")
                                 : settings.patch_dir;
     std::vector<gql::RomEntry> patch_entries;
+    // Found at startup rather than when the Archipelago tab is first opened,
+    // because patches can be named on the command line and there may be no
+    // menu in it at all.
+    if (settings.ap_dir.empty()) settings.ap_dir = gql::find_ap_install();
+    if (!ap_server_arg.empty()) settings.ap_server = ap_server_arg;
     if (!roms.empty())
         std::printf("library: %d cartridges in %s\n", (int)roms.size(),
                     rom_dir.c_str());
@@ -869,6 +885,18 @@ int main(int argc, char** argv) {
             m.ap_stage.store(Machine::ApStage::Failed);
         });
     };
+
+    // Patches named on the command line, started now that everything they
+    // need exists. Each takes a while and runs on its own thread, so this
+    // only kicks them off.
+    for (int i = 0; i < players; ++i) {
+        if (per_patch[i].empty()) continue;
+        if (settings.ap_dir.empty()) {
+            std::fprintf(stderr, "--patch: no Archipelago install found\n");
+            break;
+        }
+        begin_archipelago(i, per_patch[i]);
+    }
 
     // Hand one machine a different cartridge, without disturbing the others.
     // The thread has to go first: the instance belongs to it, and reopening a
@@ -1100,14 +1128,17 @@ int main(int argc, char** argv) {
         // Exactly one Archipelago listener is open at a time.
         //
         // A game client finds its emulator by walking ports 43055 upwards and
-        // taking the first that answers. Nothing in that exchange says which
-        // player a client belongs to, so two listeners open at once is a race
-        // between two clients for the lower port. Losing that race is not
-        // loud: a client that lands on the wrong quadrant finds a cartridge
-        // running the same game it expected, validates against it happily,
-        // and from then on sends one player's items to another. Handing the
-        // port out to one machine at a time, in player order, turns the race
-        // into an ordering.
+        // taking the first that answers, and with two listeners open the
+        // second client's connection is accepted into the backlog of a socket
+        // nobody is accepting from: it waits there until it times out, rather
+        // than being refused and moving on to the next port. One at a time is
+        // what makes four clients sort themselves across four quadrants.
+        //
+        // Which client ends up on which quadrant does not matter, and it is
+        // worth knowing that it does not. A client takes its identity from the
+        // cartridge it finds rather than from the patch it was started with,
+        // so one that attaches to another player's quadrant simply plays that
+        // slot. Four clients over four quadrants is right in any order.
         {
             const long long now_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(

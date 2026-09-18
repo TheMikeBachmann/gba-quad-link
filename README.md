@@ -139,6 +139,17 @@ be inside a `.zip` or `.7z`.
 or generate a seed locally with `ArchipelagoGenerate`. Patches default to
 `~/.local/share/gba-quad-link/patches`, and the picker can browse anywhere.
 
+Patches can also be named up front, which is useful for a Steam shortcut that
+always starts the same multiworld:
+
+```sh
+gba-quad-link --players 4 --ap-server localhost:38281 \
+  --player 1 --patch seed_P1_Borf.apemerald \
+  --player 2 --patch seed_P2_Vega.apemerald \
+  --player 3 --patch seed_P3_Ridley.apmzm \
+  --player 4 --patch seed_P4_Samus.apmzm
+```
+
 ### What happens by itself
 
 Once you choose a patch for a player, in order:
@@ -159,6 +170,9 @@ Once you choose a patch for a player, in order:
 A patch generated locally carries no server address; put one in the **Server**
 box on the Archipelago tab and it is used for every slot. A patch downloaded
 from a room carries its own, and the box is ignored.
+
+Four slots at once is tested, not assumed: four clients, two games, all four
+joining the same multiworld from one window.
 
 Each player's client output appears on the tab, interleaved in the order things
 actually happened, which is the only useful way to read four connections at
@@ -256,10 +270,14 @@ from a desktop terminal.
 
 **An Archipelago client that hangs holds up the ones behind it.** Game clients
 find their emulator by taking the first port that answers between 43055 and
-43059, and nothing in that exchange says which player a client belongs to — so
-ports are handed out one at a time, in player order, or two clients race and can
-end up driving each other's quadrants. A client that dies drops out of the queue
+43059, so those ports are handed out one at a time — with two open at once, the
+second client's connection sits in a backlog nobody is listening to and times
+out instead of trying the next port. A client that dies drops out of the queue
 by itself. One that hangs says so after twenty seconds; **Clear** gets rid of it.
+
+Which client lands on which quadrant does not matter: a client takes its
+identity from the cartridge it finds, not from the patch it was started with, so
+four clients across four quadrants come out right in any order.
 
 **EmuDeck may reset Dolphin's SI ports.** Its launcher deploys a config with
 every port set to a standard controller, so a GBA (TCP) setting made through

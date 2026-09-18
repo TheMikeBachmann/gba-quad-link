@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
 #include <fstream>
 #include <regex>
 #include <cstdlib>
@@ -21,6 +22,12 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// host.yaml is read and rewritten whole, and four players being set up at once
+// means four threads doing that to the same file. Without this, two worlds
+// writing two different keys is one of those writes silently lost, and a
+// reader can catch the file mid-truncate.
+std::mutex g_host_yaml;
+
 }  // namespace
 
 namespace {
@@ -28,6 +35,7 @@ namespace {
 // Every key in host.yaml, with the cartridge field each one declares.
 std::map<std::string, std::string> host_yaml_keys(const std::string& ap_dir) {
     std::map<std::string, std::string> out;
+    std::lock_guard<std::mutex> lk(g_host_yaml);
     std::ifstream f(fs::path(ap_dir) / "host.yaml");
     std::string line, key;
     while (std::getline(f, line)) {
@@ -171,6 +179,7 @@ std::string find_ap_install() {
 
 bool set_ap_rom_path(const std::string& ap_dir, const ApWorld& world,
                      const std::string& rom, std::string* err) {
+    std::lock_guard<std::mutex> lk(g_host_yaml);
     const fs::path cfg = fs::path(ap_dir) / "host.yaml";
     std::ifstream in(cfg);
     if (!in) {
@@ -201,13 +210,31 @@ bool set_ap_rom_path(const std::string& ap_dir, const ApWorld& world,
              ": \"" + safe + "\"\n";
     }
 
-    std::ofstream out(cfg, std::ios::trunc);
-    if (!out) {
-        if (err) *err = "cannot write host.yaml";
+    // Written beside the original and renamed over it, because this is the
+    // file Archipelago needs in order to start at all: a write interrupted
+    // halfway leaves the user with an install that no longer runs.
+    const fs::path tmp = cfg.string() + ".gql-tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            if (err) *err = "cannot write host.yaml";
+            return false;
+        }
+        out << s;
+        out.flush();
+        if (!out) {
+            if (err) *err = "could not write host.yaml";
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, cfg, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        if (err) *err = "could not replace host.yaml";
         return false;
     }
-    out << s;
-    return static_cast<bool>(out);
+    return true;
 }
 
 }  // namespace gql
