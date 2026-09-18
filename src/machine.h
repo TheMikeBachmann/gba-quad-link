@@ -22,6 +22,7 @@
 #include <thread>
 #include <vector>
 
+#include "ap_connector.h"
 #include "gba_instance.h"
 
 namespace gql {
@@ -110,6 +111,9 @@ struct Machine {
     std::atomic<bool> want_title{false};
     std::string title;
     bool have_title = false;
+
+    // This machine's end of an Archipelago game client, when one is wanted.
+    ApConnector ap;
 
     // Stops this machine alone, so a player can be handed a different
     // cartridge without the other three being taken down with them.

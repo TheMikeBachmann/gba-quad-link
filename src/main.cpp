@@ -118,6 +118,7 @@ void machine_thread(Machine* me, gql::AudioMixer* mixer) {
         const bool completed = me->gba.run_frame();
         me->gba.cable_wait();
         me->gba.note_sio_mode();
+        me->ap.serve(me->gba);
         if (me->want_title.exchange(false, std::memory_order_relaxed)) {
             std::lock_guard<std::mutex> lk(me->fb_mutex);
             me->title = me->gba.rom_title();
@@ -229,6 +230,8 @@ int main(int argc, char** argv) {
     // an Archipelago game client does to decide whether it is looking at the
     // cartridge it expects.
     bool dump_rom_title = false;
+    // Listen for Archipelago's game clients, one port per machine.
+    bool archipelago = false;
     uint16_t data_port = 54970, clock_port = 49420;
     int scale = 2;
     bool fullscreen = false, integer_scale = false, verbose = false;
@@ -286,6 +289,7 @@ int main(int argc, char** argv) {
         else if (a == "--self-test-restart") self_test_restart = true;
         else if (a == "--self-test-join") self_test_join = true;
         else if (a == "--dump-rom-title") dump_rom_title = true;
+        else if (a == "--archipelago") archipelago = true;
         else if (a == "--data-port")
             data_port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--clock-port")
@@ -667,6 +671,19 @@ int main(int argc, char** argv) {
                                             next_slot_in(machines[i].group, i));
         std::printf("link cable: %d machines chained\n", on_cable);
         }
+    }
+
+    if (archipelago) {
+        for (int i = 0; i < players && i < gql::kApPortCount; ++i) {
+            const int port = gql::kApPortFirst + i;
+            if (machines[i].ap.open(port, i))
+                std::printf("p%d archipelago: listening on 127.0.0.1:%d\n",
+                            i + 1, port);
+            else
+                std::printf("p%d archipelago: port %d is taken - is BizHawk "
+                            "running?\n", i + 1, port);
+        }
+        std::fflush(stdout);
     }
 
     for (int i = 0; i < players; ++i) {
@@ -1545,6 +1562,7 @@ int main(int argc, char** argv) {
                                 machines[i].gba.sio_mode(),
                                 (unsigned)machines[i].gba.rcnt(),
                                 machines[i].gba.cable_sleeps());
+                    if (machines[i].ap.client_connected()) std::printf("[AP]");
                     if (machines[i].gba.cable_timeouts())
                         std::printf("[!%lu stalls]",
                                     machines[i].gba.cable_timeouts());
@@ -1561,6 +1579,7 @@ int main(int argc, char** argv) {
     // Before the joins, not after: a machine parked in a stalled run_frame()
     // never reaches the top of its loop to notice.
     for (int i = 0; i < players; ++i) {
+        machines[i].ap.close();
         machines[i].gba.shutdown_link();
         machines[i].gba.wake_cable();   // release anyone parked on the cable
     }

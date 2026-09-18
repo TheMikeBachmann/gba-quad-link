@@ -98,6 +98,7 @@ add_executable(gba-quad-link
     src/settings.cpp
     src/audio.cpp
     src/minijson.cpp
+    src/ap_connector.cpp
     src/cable.cpp
     src/controls.cpp
     src/paths.cpp)

@@ -23,3 +23,11 @@ runtime-x86_64
 build/AppDir/
 squashfs-root/
 build-asan/
+
+# Archipelago: an 87MB third-party AppImage, and patch files that carry
+# somebody's slot name and seed. Neither belongs in the repository.
+Archipelago/
+archipelago/
+*.apemerald
+*.apbn3
+*.apz3
