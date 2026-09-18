@@ -535,9 +535,26 @@ bool GbaInstance::write_memory(const std::string& domain, std::uint32_t address,
     if (!core_ || !data) return false;
     struct GBA* gba = static_cast<struct GBA*>(core_->board);
 
-    // Writing to ROM is meaningless on hardware and a good way to confuse a
-    // running game, so it is refused rather than quietly allowed.
-    if (domain == "ROM") return false;
+    // ROM is written through mGBA's patch path rather than into the buffer
+    // region_for() hands back. A cartridge loaded from a file is a read-only
+    // mapping of that file, so memcpy into it would fault; GBAPatch8 calls
+    // _pristineCow first, which replaces the mapping with a writable copy.
+    //
+    // It is a real thing for a client to want. Writing to ROM is meaningless
+    // on hardware, but this is an emulator and the region is just a buffer —
+    // Circle of the Moon's world writes there every frame it has something to
+    // deliver, and refusing was an error on every one of them.
+    if (domain == "ROM") {
+        if (address > gba->memory.romSize ||
+            size > gba->memory.romSize - address)
+            return false;
+        for (std::size_t i = 0; i < size; ++i)
+            core_->rawWrite8(core_,
+                             GBA_BASE_ROM0 + address +
+                                 static_cast<std::uint32_t>(i),
+                             -1, data[i]);
+        return true;
+    }
 
     const Region r = region_for(gba, domain);
     if (r.base) {
