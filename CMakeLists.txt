@@ -87,6 +87,9 @@ target_include_directories(imgui SYSTEM PUBLIC
 find_package(SDL2 REQUIRED)
 # Reading Archipelago patch files, which are zips.
 find_package(ZLIB REQUIRED)
+# For fetching Archipelago. Linked rather than shelled out to, so an AppImage
+# carries its own and does not depend on the host having the curl binary.
+find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 target_link_libraries(imgui PUBLIC SDL2::SDL2)
 
@@ -104,9 +107,11 @@ add_executable(gba-quad-link
     src/ap_patch.cpp
     src/ap_session.cpp
     src/ap_worlds.cpp
+    src/ap_fetch.cpp
+    src/fetch.cpp
     src/cable.cpp
     src/controls.cpp
     src/paths.cpp)
 target_include_directories(gba-quad-link PRIVATE src)
 target_link_libraries(gba-quad-link PRIVATE
-    mgba_headers imgui SDL2::SDL2 Threads::Threads ZLIB::ZLIB)
+    mgba_headers imgui SDL2::SDL2 Threads::Threads ZLIB::ZLIB CURL::libcurl)

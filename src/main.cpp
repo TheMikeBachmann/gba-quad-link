@@ -41,6 +41,7 @@
 #include "layout.h"
 #include "machine.h"
 #include "paths.h"
+#include "ap_fetch.h"
 #include "ap_patch.h"
 #include "ap_worlds.h"
 #include "romlist.h"
@@ -767,6 +768,10 @@ int main(int argc, char** argv) {
     // because patches can be named on the command line and there may be no
     // menu in it at all.
     if (settings.ap_dir.empty()) settings.ap_dir = gql::find_ap_install();
+    gql::ApInstall ap_install;
+    const std::string ap_install_dir =
+        (gql::data_dir().empty() ? std::string("archipelago")
+                                 : gql::data_dir() + "/archipelago");
     if (!ap_server_arg.empty()) settings.ap_server = ap_server_arg;
     if (!roms.empty())
         std::printf("library: %d cartridges in %s\n", (int)roms.size(),
@@ -1639,10 +1644,50 @@ int main(int argc, char** argv) {
                     if (!found.empty()) { settings.ap_dir = found; remember(); }
                 }
                 if (settings.ap_dir.empty()) {
+                    // The one step this cannot do on its own, until it is
+                    // asked to. Behind a button rather than automatic:
+                    // ninety megabytes is a lot to spend because somebody
+                    // opened a tab to see what was on it, and what arrives
+                    // is a program that then gets run.
                     ImGui::TextWrapped(
                         "Archipelago is not installed where this can find it. "
-                        "Put a copy in ~/.local/share/gba-quad-link/archipelago "
-                        "(an unpacked AppImage is fine) and reopen this tab.");
+                        "It can be fetched now, or put a copy in "
+                        "~/.local/share/gba-quad-link/archipelago yourself "
+                        "(an unpacked AppImage is fine).");
+                    ImGui::Spacing();
+
+                    const auto st = ap_install.stage();
+                    if (ap_install.busy()) {
+                        const float p = ap_install.progress();
+                        if (p >= 0.0f)
+                            ImGui::ProgressBar(p, ImVec2(360, 0));
+                        else
+                            // Negative runs ImGui's indeterminate bar, which
+                            // is the honest thing to show while GitHub has
+                            // not said how big it is.
+                            ImGui::ProgressBar(
+                                -1.0f * static_cast<float>(ImGui::GetTime()),
+                                ImVec2(360, 0), "working");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel")) ap_install.cancel();
+                        ImGui::TextDisabled("%s", ap_install.note().c_str());
+                    } else {
+                        if (ImGui::Button("Download Archipelago (about 90 MB)",
+                                          ImVec2(360, 0)))
+                            ap_install.start(ap_install_dir);
+                        if (st == gql::ApInstall::Stage::Failed) {
+                            ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f),
+                                               "%s", ap_install.note().c_str());
+                        }
+                    }
+
+                    // Adopt it the moment it lands, so the tab fills in
+                    // rather than asking to be reopened.
+                    if (st == gql::ApInstall::Stage::Done &&
+                        !ap_install.installed().empty()) {
+                        settings.ap_dir = ap_install.installed();
+                        remember();
+                    }
                 } else {
                 if (browsing_patch_for >= 0) {
                     ImGui::Text("Patch for player %d", browsing_patch_for + 1);

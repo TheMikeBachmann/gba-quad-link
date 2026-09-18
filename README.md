@@ -116,8 +116,15 @@ the patched game boots in that quadrant.
 
 Three things, once each.
 
-**1. Install Archipelago.** The Linux AppImage is fine — unpack it with
-`--appimage-extract` and put it anywhere below one of:
+**1. Install Archipelago.** The Archipelago tab offers to fetch it: **Download
+Archipelago**, about 90MB, unpacked into
+`~/.local/share/gba-quad-link/archipelago` and adopted as soon as it lands.
+
+It is a button rather than something that happens on its own, because 90MB is
+a lot to spend on somebody's connection because they opened a tab to see what
+was on it, and because what arrives is a program that then gets run.
+
+To use a copy you already have instead, put it anywhere below one of:
 
 ```
 $GQL_AP_DIR

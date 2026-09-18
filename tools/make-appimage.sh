@@ -43,7 +43,17 @@ chmod +x "$appdir/AppRun"
 # Libraries a host may not have, or may have too old. Everything else — libc,
 # libm, and whatever SDL dlopens for Wayland, X11, ALSA and PipeWire — comes
 # from the host on purpose: those have to match the machine it runs on.
-for soname in libSDL2-2.0.so.0 libstdc++.so.6 libgcc_s.so.1; do
+#
+# libcurl brings a tail of its own, and all of it is bundled deliberately.
+# Taking TLS from the host means matching whichever OpenSSL soname that host
+# happens to have, which is exactly the portability problem this is meant to
+# avoid; carrying our own costs twelve megabytes and depends on nothing. The
+# certificates themselves are still the host's, found at run time, because
+# those are the ones it actually trusts.
+for soname in libSDL2-2.0.so.0 libstdc++.so.6 libgcc_s.so.1 \
+              libcurl.so.4 libssl.so.3 libcrypto.so.3 \
+              libnghttp2.so.14 libidn2.so.0 libpsl.so.5 \
+              libunistring.so.5 libzstd.so.1; do
     path="$(ldd "$bin" | awk -v s="$soname" '$1 == s { print $3 }')"
     if [ -n "$path" ] && [ -e "$path" ]; then
         cp -L "$path" "$appdir/usr/lib/$soname"
